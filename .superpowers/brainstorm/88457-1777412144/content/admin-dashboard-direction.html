@@ -1,0 +1,83 @@
+<h2>Admin Dashboard Direction</h2>
+<p class="subtitle">Pick the first useful version. We can expand later after the Telegram bot workflow is stable.</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">A. Operations Command Center</div>
+        <div class="mockup-body">
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px">
+            <div class="placeholder">Open pools<br><strong>7</strong></div>
+            <div class="placeholder">Waiting drivers<br><strong>3</strong></div>
+            <div class="placeholder">Arrival issues<br><strong>1</strong></div>
+            <div class="placeholder">Completed today<br><strong>18</strong></div>
+          </div>
+          <div style="display:grid;grid-template-columns:1.5fr 1fr;gap:12px">
+            <div class="placeholder" style="height:170px">Live pool table<br>route, passengers, status, driver, timer</div>
+            <div class="placeholder" style="height:170px">Action panel<br>set price, inspect pool, repost job</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Operations Command Center</h3>
+      <p>Best first build: monitor live pools, driver assignment, arrival timers, route prices, and stuck jobs.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">B. Business Desk</div>
+        <div class="mockup-body">
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px">
+            <div class="placeholder">Revenue<br><strong>ETB 8,400</strong></div>
+            <div class="placeholder">Paid seats<br><strong>72</strong></div>
+            <div class="placeholder">Top route<br><strong>CMC</strong></div>
+          </div>
+          <div class="placeholder" style="height:170px">Route performance chart and payment review queue</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Business Desk</h3>
+      <p>Useful for pricing and finance, but less helpful when dispatch problems are happening live.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">C. Full Back Office</div>
+        <div class="mockup-body">
+          <div style="display:grid;grid-template-columns:120px 1fr;gap:12px">
+            <div class="mock-sidebar">Pools<br>Routes<br>Drivers<br>Users<br>Payments<br>Reports</div>
+            <div class="placeholder" style="height:190px">Everything in one admin system</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Full Back Office</h3>
+      <p>Powerful later, but too broad for the first clean admin dashboard slice.</p>
+    </div>
+  </div>
+</div>
+
+<div class="pros-cons">
+  <div class="pros">
+    <h4>My recommendation</h4>
+    <ul>
+      <li>Start with A so the admin can control the live Telegram workflow.</li>
+      <li>Add finance/reporting after we know what data matters day to day.</li>
+    </ul>
+  </div>
+  <div class="cons">
+    <h4>Keep out for now</h4>
+    <ul>
+      <li>No fake revenue charts before real payment integration.</li>
+      <li>No complex user management until roles are clearly needed.</li>
+    </ul>
+  </div>
+</div>
