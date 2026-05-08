@@ -1,8 +1,12 @@
 import type { PassengerPoolView, PrimaryAction, Route, TelegramUserProfile } from './types';
+import { translate, type LanguageCode } from './i18n';
 
-export function formatPrice(price: { priceAmount: number | null; priceCurrency: string }): string {
+export function formatPrice(
+  price: { priceAmount: number | null; priceCurrency: string },
+  language: LanguageCode = 'en'
+): string {
   if (price.priceAmount === null) {
-    return 'not set';
+    return language === 'am' ? 'አልተዘጋጀም' : 'not set';
   }
 
   return `${Number.isInteger(price.priceAmount) ? price.priceAmount : price.priceAmount.toFixed(2)} ${
@@ -10,9 +14,9 @@ export function formatPrice(price: { priceAmount: number | null; priceCurrency: 
   }`;
 }
 
-export function formatPassengerName(user: TelegramUserProfile | null): string {
+export function formatPassengerName(user: TelegramUserProfile | null, language: LanguageCode = 'en'): string {
   if (!user) {
-    return 'Passenger';
+    return language === 'am' ? 'ተሳፋሪ' : 'Passenger';
   }
 
   if (user.username) {
@@ -23,31 +27,56 @@ export function formatPassengerName(user: TelegramUserProfile | null): string {
   return fullName || `Telegram ${user.telegramId}`;
 }
 
-export function primaryActionLabel(action: PrimaryAction): string {
-  const labels: Record<PrimaryAction, string> = {
-    choose_route: 'Choose Route',
-    confirm_payment: 'I Have Paid',
-    wait_for_pool: 'Waiting for Pool',
-    request_early_dispatch: "Let's Go Now",
-    wait_for_driver: 'Waiting for Driver',
-    confirm_arrival: 'Confirm Driver Arrival',
-    in_trip: 'Trip in Progress',
-    completed: 'Trip Complete'
+export function primaryActionLabel(action: PrimaryAction, language: LanguageCode = 'en'): string {
+  const labels: Record<LanguageCode, Record<PrimaryAction, string>> = {
+    en: {
+      choose_route: 'Choose Route',
+      confirm_payment: 'I Have Paid',
+      wait_for_pool: 'Waiting for Pool',
+      request_early_dispatch: "Let's Go Now",
+      wait_for_driver: 'Waiting for Driver',
+      confirm_arrival: 'Confirm Driver Arrival',
+      in_trip: 'Trip in Progress',
+      completed: 'Trip Complete'
+    },
+    am: {
+      choose_route: 'መንገድ ይምረጡ',
+      confirm_payment: 'ከፍያለሁ',
+      wait_for_pool: 'ፑል በመጠበቅ',
+      request_early_dispatch: 'አሁን እንሂድ',
+      wait_for_driver: 'ሾፌር በመጠበቅ',
+      confirm_arrival: 'የሾፌር መድረስ አረጋግጥ',
+      in_trip: 'ጉዞ በሂደት ላይ',
+      completed: 'ጉዞ ተጠናቋል'
+    }
   };
 
-  return labels[action];
+  return labels[language][action];
 }
 
-export function formatPoolSeatLabel(pool: { passengerCount: number; seatsLeft: number }): string {
+export function formatPoolSeatLabel(
+  pool: { passengerCount: number; seatsLeft: number },
+  language: LanguageCode = 'en'
+): string {
   if (pool.seatsLeft <= 1 && pool.passengerCount > 0) {
-    return 'Almost full';
+    return language === 'am' ? 'ሊሞላ ነው' : 'Almost full';
+  }
+
+  if (language === 'am') {
+    return `${pool.seatsLeft} መቀመጫ ቀርቷል`;
   }
 
   return `${pool.seatsLeft} ${pool.seatsLeft === 1 ? 'seat' : 'seats'} left`;
 }
 
-export function poolOccupancyLabel(pool: { passengerCount: number }, poolSize: number): string {
-  return `${pool.passengerCount} / ${poolSize} seats`;
+export function poolOccupancyLabel(
+  pool: { passengerCount: number },
+  poolSize: number,
+  language: LanguageCode = 'en'
+): string {
+  return language === 'am'
+    ? `${pool.passengerCount} / ${poolSize} መቀመጫ`
+    : `${pool.passengerCount} / ${poolSize} seats`;
 }
 
 export function isRouteBookable(route: Pick<Route, 'priceAmount'>): boolean {
@@ -81,43 +110,51 @@ export function shouldClearRoutePoolsAfterStateRefresh(
   return Boolean(state.activePool || shouldShowCompletedTrip(state.lastCompletedPool, dismissedCompletedPoolId));
 }
 
-export function resolveMiniAppError(error: unknown, context: 'passenger' | 'admin' = 'passenger'): string {
+export function resolveMiniAppError(
+  error: unknown,
+  context: 'passenger' | 'admin' = 'passenger',
+  language: LanguageCode = 'en'
+): string {
   const status = getErrorStatus(error);
   const code = getErrorCode(error);
 
   if (status === 401) {
-    return context === 'admin' ? 'Open this dashboard from Telegram.' : 'Open this app from Telegram.';
+    return context === 'admin'
+      ? translate(language, 'errorOpenDashboard')
+      : translate(language, 'errorOpenTelegram');
   }
 
   if (status === 403) {
-    return context === 'admin' ? 'Admin access required.' : 'This action is not allowed for your account.';
+    return context === 'admin'
+      ? translate(language, 'errorAdminAccess')
+      : translate(language, 'errorActionNotAllowed');
   }
 
   if (status === 409) {
     if (code === 'phone_required') {
-      return 'Save your phone number before creating, joining, or paying for a pool.';
+      return translate(language, 'errorPhoneRequired');
     }
 
     if (code === 'workflow_channel_mismatch' || code === 'active_pool_exists') {
-      return 'This ride is already active in another place. Refresh and continue there.';
+      return translate(language, 'activePoolExists');
     }
 
     if (code === 'pool_not_joinable') {
-      return 'This pool is no longer available. Please start a new pool.';
+      return translate(language, 'errorPoolGone');
     }
 
-    return 'This changed already. Refresh and try again.';
+    return translate(language, 'errorChanged');
   }
 
   if (status !== null && status >= 500) {
-    return 'Service is temporarily unavailable. Try again.';
+    return translate(language, 'errorServer');
   }
 
   if (error instanceof TypeError) {
-    return 'Service unavailable. Check connection and try again.';
+    return translate(language, 'errorNetwork');
   }
 
-  return context === 'admin' ? 'Could not update admin dashboard.' : 'Could not update. Try again.';
+  return context === 'admin' ? translate(language, 'errorGenericAdmin') : translate(language, 'errorGeneric');
 }
 
 export function buildAuthHeaders(initData: string): Record<string, string> {

@@ -21,6 +21,7 @@ describe('Mini App helpers', () => {
   it('formats unset and set route prices', () => {
     expect(formatPrice({ priceAmount: null, priceCurrency: 'ETB' })).toBe('not set');
     expect(formatPrice({ priceAmount: 75, priceCurrency: 'ETB' })).toBe('75 ETB');
+    expect(formatPrice({ priceAmount: null, priceCurrency: 'ETB' }, 'am')).toBe('አልተዘጋጀም');
   });
 
   it('treats routes without prices as not bookable', () => {
@@ -42,6 +43,7 @@ describe('Mini App helpers', () => {
   it('maps primary actions to passenger-facing labels', () => {
     expect(primaryActionLabel('confirm_payment')).toBe('I Have Paid');
     expect(primaryActionLabel('confirm_arrival')).toBe('Confirm Driver Arrival');
+    expect(primaryActionLabel('confirm_payment', 'am')).toBe('ከፍያለሁ');
   });
 
   it('builds Telegram init data auth headers', () => {
@@ -79,6 +81,9 @@ describe('Mini App helpers', () => {
     expect(resolveMiniAppError({ status: 503 })).toBe('Service is temporarily unavailable. Try again.');
     expect(resolveMiniAppError(new TypeError('Failed to fetch'))).toBe(
       'Service unavailable. Check connection and try again.'
+    );
+    expect(resolveMiniAppError({ status: 409, code: 'phone_required' }, 'passenger', 'am')).toBe(
+      'ፑል ከመፍጠር፣ ከመቀላቀል ወይም ከመክፈል በፊት ስልክዎን ያስቀምጡ።'
     );
   });
 

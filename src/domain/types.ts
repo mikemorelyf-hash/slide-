@@ -1,3 +1,5 @@
+import type { SupportedLanguageCode } from './language.js';
+
 export type PoolStatus =
   | 'open'
   | 'ready'
@@ -140,6 +142,7 @@ export interface TelegramUserProfile {
   firstName: string | null;
   lastName: string | null;
   username: string | null;
+  languageCode?: SupportedLanguageCode;
   phoneNumber?: string | null;
   locationLat?: number | null;
   locationLng?: number | null;

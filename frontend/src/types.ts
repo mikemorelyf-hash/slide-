@@ -17,6 +17,7 @@ export type PoolStatus =
   | 'completed';
 export type PaymentStatus = 'pending' | 'confirmed' | 'cancelled';
 export type WorkflowChannel = 'telegram' | 'mini_app';
+export type LanguageCode = 'en' | 'am';
 export type PrimaryAction =
   | 'choose_route'
   | 'confirm_payment'
@@ -32,6 +33,7 @@ export interface TelegramUserProfile {
   firstName: string | null;
   lastName: string | null;
   username: string | null;
+  languageCode?: LanguageCode;
   phoneNumber?: string | null;
   role?: 'passenger' | 'driver' | 'admin';
 }

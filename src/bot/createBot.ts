@@ -12,12 +12,15 @@ import type {
   TelegramUserProfile
 } from '../domain/types.js';
 import { PostgresRidePoolStore } from '../db/postgresRidePoolStore.js';
+import { isSupportedLanguageCode, type SupportedLanguageCode } from '../domain/language.js';
 import { parseSetPriceCommand } from './adminPriceCommand.js';
 import type { BotRegistry } from './botRegistry.js';
 import { ensureDriverBotStarted } from './driverAccess.js';
+import { getLanguageTargets, getUserLanguage, profileLanguage } from './language.js';
 import {
   adminPoolSummary,
   adminRouteSummary,
+  botLabel,
   earlyDispatchCancelledMessage,
   earlyDispatchRequestMessage,
   earlyDispatchStartedMessage,
@@ -38,6 +41,8 @@ import {
   poolReadyPassengerMessage,
   profilePromptMessage,
   profileStatusMessage,
+  languageMenuMessage,
+  languageUpdatedMessage,
   routeButtonLabel,
   routeIntroMessage,
   tripCompletedDriverMessage,
@@ -61,23 +66,29 @@ export function createRidePoolBot({ config, store, service, bots }: BotDeps): Te
   const bot = new Telegraf(config.botToken);
 
   bot.start(async (ctx) => {
-    await upsertUserFromContext(ctx, store);
-    await sendRouteList(ctx, config, store);
+    const profile = await upsertUserFromContext(ctx, store);
+    await sendRouteList(ctx, config, store, profileLanguage(profile));
   });
 
   bot.command('routes', async (ctx) => {
-    await upsertUserFromContext(ctx, store);
-    await sendRouteList(ctx, config, store);
+    const profile = await upsertUserFromContext(ctx, store);
+    await sendRouteList(ctx, config, store, profileLanguage(profile));
+  });
+
+  bot.command('language', async (ctx) => {
+    const profile = await upsertUserFromContext(ctx, store);
+    const language = profileLanguage(profile);
+    await ctx.reply(languageMenuMessage(language), languageKeyboard(language));
   });
 
   bot.command('profile', async (ctx) => {
-    await upsertUserFromContext(ctx, store);
-    await sendProfilePrompt(ctx, store);
+    const profile = await upsertUserFromContext(ctx, store);
+    await sendProfilePrompt(ctx, store, profileLanguage(profile));
   });
 
   bot.command('my_pool', async (ctx) => {
-    await upsertUserFromContext(ctx, store);
-    await sendMyPool(ctx, config, store);
+    const profile = await upsertUserFromContext(ctx, store);
+    await sendMyPool(ctx, config, store, profileLanguage(profile));
   });
 
   bot.command('cancel', async (ctx) => {
@@ -86,19 +97,20 @@ export function createRidePoolBot({ config, store, service, bots }: BotDeps): Te
       return;
     }
 
-    await upsertUserFromContext(ctx, store);
+    const profile = await upsertUserFromContext(ctx, store);
+    const language = profileLanguage(profile);
     const active = await store.getActivePoolForPassenger(telegramId);
     const result = active ? await service.cancelBeforeDispatch(active.pool.id, telegramId) : { kind: 'not_allowed' as const };
     if (result.kind === 'workflow_channel_mismatch') {
-      await ctx.reply(miniAppWorkflowMessage(), miniAppKeyboard(config));
+      await ctx.reply(miniAppWorkflowMessage(language), miniAppKeyboard(config, language));
       return;
     }
 
     await ctx.reply(
       result.kind === 'cancelled'
-        ? 'Your pool participation was cancelled before dispatch.'
-        : 'No cancellable pool was found. If a driver already accepted, please coordinate with the driver/admin.',
-      backToRoutesKeyboard()
+        ? botLabel('poolParticipationCancelled', language)
+        : botLabel('noCancellablePool', language),
+      backToRoutesKeyboard(language)
     );
   });
 
@@ -108,20 +120,21 @@ export function createRidePoolBot({ config, store, service, bots }: BotDeps): Te
       return;
     }
 
-    await upsertUserFromContext(ctx, store, 'driver');
+    const profile = await upsertUserFromContext(ctx, store, 'driver');
+    const language = profileLanguage(profile);
     const pinCode = readCommandArgument(ctx);
     if (!pinCode) {
-      await ctx.reply('Usage: /complete 4334');
+      await ctx.reply(botLabel('usageComplete', language));
       return;
     }
 
     const result = await service.completeTrip(pinCode, telegramId);
     if (result.kind === 'invalid_pin') {
-      await ctx.reply('Invalid PIN. Please check with the passengers and try again.');
+      await ctx.reply(botLabel('invalidPin', language));
       return;
     }
 
-    await ctx.reply(tripCompletedDriverMessage(result.pool));
+    await ctx.reply(tripCompletedDriverMessage(result.pool, language));
     await notifyTripCompleted(bot, config, store, result.pool);
   });
 
@@ -201,26 +214,47 @@ export function createRidePoolBot({ config, store, service, bots }: BotDeps): Te
 
   bot.action('routes', async (ctx) => {
     await ctx.answerCbQuery();
+    const profile = await upsertUserFromContext(ctx, store);
+    await sendRouteList(ctx, config, store, profileLanguage(profile), true);
+  });
+
+  bot.action('language_menu', async (ctx) => {
+    await ctx.answerCbQuery();
+    const profile = await upsertUserFromContext(ctx, store);
+    const language = profileLanguage(profile);
+    await editOrReply(ctx, languageMenuMessage(language), languageKeyboard(language));
+  });
+
+  bot.action(/^language:(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const telegramId = requireTelegramUserId(ctx);
+    if (!telegramId) {
+      return;
+    }
+
+    const nextLanguage = isSupportedLanguageCode(ctx.match[1]) ? ctx.match[1] : 'en';
     await upsertUserFromContext(ctx, store);
-    await sendRouteList(ctx, config, store, true);
+    await store.updateUserLanguage(telegramId, nextLanguage);
+    await editOrReply(ctx, languageUpdatedMessage(nextLanguage), languageKeyboard(nextLanguage));
   });
 
   bot.action(/^route:(.+)$/, async (ctx) => {
     await ctx.answerCbQuery();
-    await upsertUserFromContext(ctx, store);
+    const profile = await upsertUserFromContext(ctx, store);
+    const language = profileLanguage(profile);
     const routeId = ctx.match[1];
     const route = await store.getRoute(routeId);
 
     if (!route?.isActive) {
-      await editOrReply(ctx, 'That route is not available right now.', backToRoutesKeyboard());
+      await editOrReply(ctx, botLabel('routeNotAvailable', language), backToRoutesKeyboard(language));
       return;
     }
 
     if (route.priceAmount === null) {
       await editOrReply(
         ctx,
-        'That route price is not set yet. Please choose a route with a price.',
-        backToRoutesKeyboard()
+        botLabel('routePriceUnsetChoose', language),
+        backToRoutesKeyboard(language)
       );
       return;
     }
@@ -229,10 +263,10 @@ export function createRidePoolBot({ config, store, service, bots }: BotDeps): Te
     if (openPool) {
       await editOrReply(
         ctx,
-        openPoolMessage(openPool, config.poolSize),
+        openPoolMessage(openPool, config.poolSize, language),
         Markup.inlineKeyboard([
-          [Markup.button.callback('Join Pool', `join:${openPool.id}`)],
-          [Markup.button.callback('Back to Routes', 'routes')]
+          [Markup.button.callback(botLabel('joinPool', language), `join:${openPool.id}`)],
+          [Markup.button.callback(botLabel('backToRoutes', language), 'routes')]
         ])
       );
       return;
@@ -240,10 +274,10 @@ export function createRidePoolBot({ config, store, service, bots }: BotDeps): Te
 
     await editOrReply(
       ctx,
-      noOpenPoolMessage(route.name),
+      noOpenPoolMessage(route.name, language),
       Markup.inlineKeyboard([
-        [Markup.button.callback('Create Pool', `create:${route.id}`)],
-        [Markup.button.callback('Back to Routes', 'routes')]
+        [Markup.button.callback(botLabel('createPool', language), `create:${route.id}`)],
+        [Markup.button.callback(botLabel('backToRoutes', language), 'routes')]
       ])
     );
   });
@@ -255,22 +289,28 @@ export function createRidePoolBot({ config, store, service, bots }: BotDeps): Te
       if (!telegramId) {
         return;
       }
-      await upsertUserFromContext(ctx, store);
+      const profile = await upsertUserFromContext(ctx, store);
+      const language = profileLanguage(profile);
 
       if (
-        await requirePhoneBeforePayment(ctx, store, {
-          telegramId,
-          actionType: 'create_pool',
-          routeId: ctx.match[1],
-          poolId: null,
-          expiresAt: pendingPassengerActionExpiry()
-        })
+        await requirePhoneBeforePayment(
+          ctx,
+          store,
+          {
+            telegramId,
+            actionType: 'create_pool',
+            routeId: ctx.match[1],
+            poolId: null,
+            expiresAt: pendingPassengerActionExpiry()
+          },
+          language
+        )
       ) {
         return;
       }
 
       const result = await service.createPool(ctx.match[1], telegramId);
-      await handleCreatePoolResult(ctx, config, store, result, true);
+      await handleCreatePoolResult(ctx, config, store, result, true, language);
     });
   });
 
@@ -281,61 +321,68 @@ export function createRidePoolBot({ config, store, service, bots }: BotDeps): Te
       if (!telegramId) {
         return;
       }
-      await upsertUserFromContext(ctx, store);
+      const profile = await upsertUserFromContext(ctx, store);
+      const language = profileLanguage(profile);
 
       if (
-        await requirePhoneBeforePayment(ctx, store, {
-          telegramId,
-          actionType: 'join_pool',
-          routeId: null,
-          poolId: ctx.match[1],
-          expiresAt: pendingPassengerActionExpiry()
-        })
+        await requirePhoneBeforePayment(
+          ctx,
+          store,
+          {
+            telegramId,
+            actionType: 'join_pool',
+            routeId: null,
+            poolId: ctx.match[1],
+            expiresAt: pendingPassengerActionExpiry()
+          },
+          language
+        )
       ) {
         return;
       }
 
       const result = await service.joinPool(ctx.match[1], telegramId);
-      await handleJoinPoolResult(ctx, config, store, result, true);
+      await handleJoinPoolResult(ctx, config, store, result, true, language);
     });
   });
 
   bot.action(/^paid:(.+)$/, async (ctx) => {
     await runTelegramAction(ctx, store, `paid:${ctx.match[1]}`, async () => {
-      await ctx.answerCbQuery('Payment confirmation received.');
       const telegramId = requireTelegramUserId(ctx);
       if (!telegramId) {
         return;
       }
-      await upsertUserFromContext(ctx, store);
+      const profile = await upsertUserFromContext(ctx, store);
+      const language = profileLanguage(profile);
+      await ctx.answerCbQuery(language === 'am' ? 'የክፍያ ማረጋገጫ ተቀብሏል።' : 'Payment confirmation received.');
 
       const result = await service.confirmPayment(ctx.match[1], telegramId);
       if (result.kind === 'workflow_channel_mismatch') {
-        await editOrReply(ctx, miniAppWorkflowMessage(), miniAppKeyboard(config));
+        await editOrReply(ctx, miniAppWorkflowMessage(language), miniAppKeyboard(config, language));
         return;
       }
 
       if (result.kind === 'not_found') {
-        await ctx.reply('No pending payment was found for this pool.', backToRoutesKeyboard());
+        await ctx.reply(botLabel('pendingPaymentNotFound', language), backToRoutesKeyboard(language));
         return;
       }
 
       if (result.kind === 'pool_not_joinable') {
-        await ctx.reply('Sorry, that pool already left. Please choose another pool.', backToRoutesKeyboard());
+        await ctx.reply(botLabel('poolAlreadyLeft', language), backToRoutesKeyboard(language));
         return;
       }
 
       if (result.kind === 'pool_ready') {
-        await editOrReply(ctx, poolReadyPassengerMessage(result.pool));
-        await sendProfilePrompt(ctx, store);
+        await editOrReply(ctx, poolReadyPassengerMessage(result.pool, language));
+        await sendProfilePrompt(ctx, store, language);
         await notifyPoolReady(bot, bots.driverBot ?? bot, config, store, service, result.pool, {
           excludePassengerTelegramIds: [telegramId]
         });
         return;
       }
 
-      await sendPassengerConfirmed(ctx, config, store, result.pool, result.passenger, result.passengerCount, true);
-      await sendProfilePrompt(ctx, store);
+      await sendPassengerConfirmed(ctx, config, store, result.pool, result.passenger, result.passengerCount, true, language);
+      await sendProfilePrompt(ctx, store, language);
     });
   });
 
@@ -346,19 +393,20 @@ export function createRidePoolBot({ config, store, service, bots }: BotDeps): Te
       if (!telegramId) {
         return;
       }
+      const language = await getUserLanguage(store, telegramId);
 
       const result = await service.cancelBeforeDispatch(ctx.match[1], telegramId);
       if (result.kind === 'workflow_channel_mismatch') {
-        await editOrReply(ctx, miniAppWorkflowMessage(), miniAppKeyboard(config));
+        await editOrReply(ctx, miniAppWorkflowMessage(language), miniAppKeyboard(config, language));
         return;
       }
 
       await editOrReply(
         ctx,
         result.kind === 'cancelled'
-          ? 'Your pool participation was cancelled before dispatch.'
-          : 'No cancellable pool was found. If a driver already accepted, please coordinate with the driver/admin.',
-        backToRoutesKeyboard()
+          ? botLabel('poolParticipationCancelled', language)
+          : botLabel('noCancellablePool', language),
+        backToRoutesKeyboard(language)
       );
     });
   });
@@ -367,11 +415,12 @@ export function createRidePoolBot({ config, store, service, bots }: BotDeps): Te
     await runTelegramAction(ctx, store, `accept:${ctx.match[1]}`, async () => {
       const telegramId = requireTelegramUserId(ctx);
       if (!telegramId) {
-        await ctx.answerCbQuery('Open the bot first, then try again.');
+        await ctx.answerCbQuery(botLabel('openBotFirst'));
         return;
       }
+      const language = await getUserLanguage(store, telegramId);
 
-      if (bots.driverBot && !(await ensureDriverBotStarted(ctx, store, telegramId))) {
+      if (bots.driverBot && !(await ensureDriverBotStarted(ctx, store, telegramId, language))) {
         return;
       }
 
@@ -379,11 +428,11 @@ export function createRidePoolBot({ config, store, service, bots }: BotDeps): Te
       const result = await service.acceptJob(ctx.match[1], telegramId);
 
       if (result.kind === 'already_taken') {
-        await ctx.answerCbQuery('Sorry, this job has already been taken.', { show_alert: true });
+        await ctx.answerCbQuery(botLabel('jobTaken', language), { show_alert: true });
         return;
       }
 
-      await ctx.answerCbQuery('You accepted the job.');
+      await ctx.answerCbQuery(botLabel('jobAccepted', language));
       const driverLabel = driverProfile.username
         ? `@${driverProfile.username}`
         : driverProfile.firstName ?? `Telegram ${driverProfile.telegramId}`;
@@ -395,13 +444,13 @@ export function createRidePoolBot({ config, store, service, bots }: BotDeps): Te
       }
 
       await store.enqueueNotification({
-        targetBot: bots.driverBot ? 'driver' : 'passenger',
-        chatId: telegramId,
-        messageType: 'driver_manifest',
-        payload: {
-          text: driverManifestMessage(result.pool, result.manifest),
+          targetBot: bots.driverBot ? 'driver' : 'passenger',
+          chatId: telegramId,
+          messageType: 'driver_manifest',
+          payload: {
+          text: driverManifestMessage(result.pool, result.manifest, language),
           replyMarkup: Markup.inlineKeyboard([
-            [Markup.button.callback('I Arrived', `arrived:${result.pool.id}`)]
+            [Markup.button.callback(botLabel('iArrived', language), `arrived:${result.pool.id}`)]
           ]).reply_markup
         }
       });
@@ -414,32 +463,34 @@ export function createRidePoolBot({ config, store, service, bots }: BotDeps): Te
     await runTelegramAction(ctx, store, `arrived:${ctx.match[1]}`, async () => {
       const telegramId = requireTelegramUserId(ctx);
       if (!telegramId) {
-        await ctx.answerCbQuery('Open the bot first, then try again.');
+        await ctx.answerCbQuery(botLabel('openBotFirst'));
         return;
       }
+      const language = await getUserLanguage(store, telegramId);
 
       const driverProfile = await upsertUserFromContext(ctx, store, 'driver');
       const result = await service.requestDriverArrival(ctx.match[1], telegramId);
       if (result.kind === 'not_allowed') {
-        await ctx.answerCbQuery('Arrival request is not available for this job.', {
+        await ctx.answerCbQuery(botLabel('arrivalNotAvailable', language), {
           show_alert: true
         });
         return;
       }
 
-      await ctx.answerCbQuery('Arrival request sent.');
-      await ctx.reply(driverArrivalRequestSentMessage(result.pool));
+      await ctx.answerCbQuery(botLabel('arrivalRequestSentCallback', language));
+      await ctx.reply(driverArrivalRequestSentMessage(result.pool, language));
       const passengerIds = [result.captainTelegramId, ...result.passengerIdsToNotify];
+      const targets = await getLanguageTargets(store, passengerIds);
       await store.enqueueNotifications(
-        passengerIds.map((passengerId) => ({
+        targets.map(({ telegramId: passengerId, language: passengerLanguage }) => ({
           targetBot: 'passenger' as const,
           chatId: passengerId,
           messageType: 'driver_arrival_requested',
           payload: {
-            text: driverArrivalRequestCaptainMessage(result.pool, driverProfile),
+            text: driverArrivalRequestCaptainMessage(result.pool, driverProfile, passengerLanguage),
             replyMarkup: Markup.inlineKeyboard([
-              [Markup.button.callback('Confirm Arrival', `confirm_arrival:${result.pool.id}`)],
-              [Markup.button.callback('Driver Not Here', `reject_arrival:${result.pool.id}`)]
+              [Markup.button.callback(botLabel('confirmArrival', passengerLanguage), `confirm_arrival:${result.pool.id}`)],
+              [Markup.button.callback(botLabel('driverNotHere', passengerLanguage), `reject_arrival:${result.pool.id}`)]
             ]).reply_markup
           }
         }))
@@ -455,19 +506,24 @@ export function createRidePoolBot({ config, store, service, bots }: BotDeps): Te
         return;
       }
 
-      await upsertUserFromContext(ctx, store);
+      const profile = await upsertUserFromContext(ctx, store);
+      const language = profileLanguage(profile);
       const result = await service.confirmDriverArrival(ctx.match[1], telegramId);
       if (result.kind === 'workflow_channel_mismatch') {
-        await editOrReply(ctx, miniAppWorkflowMessage(), miniAppKeyboard(config));
+        await editOrReply(ctx, miniAppWorkflowMessage(language), miniAppKeyboard(config, language));
         return;
       }
 
       if (result.kind === 'not_allowed') {
-        await ctx.reply('Only confirmed passengers in this pool can confirm driver arrival while the request is active.');
+        await ctx.reply(
+          language === 'am'
+            ? 'ጥያቄው ንቁ ሳለ መድረስን ማረጋገጥ የሚችሉት በዚህ ፑል ውስጥ የተረጋገጡ ተሳፋሪዎች ብቻ ናቸው።'
+            : 'Only confirmed passengers in this pool can confirm driver arrival while the request is active.'
+        );
         return;
       }
 
-      await replaceOrReply(ctx, driverArrivalConfirmedPassengerMessage(result.pool));
+      await replaceOrReply(ctx, driverArrivalConfirmedPassengerMessage(result.pool, language));
       await notifyPassengersDriverArrivalConfirmed(bot, store, result.pool, telegramId);
       await notifyDriverArrivalConfirmed(store, result.pool);
     });
@@ -481,19 +537,24 @@ export function createRidePoolBot({ config, store, service, bots }: BotDeps): Te
         return;
       }
 
-      await upsertUserFromContext(ctx, store);
+      const profile = await upsertUserFromContext(ctx, store);
+      const language = profileLanguage(profile);
       const result = await service.rejectDriverArrival(ctx.match[1], telegramId);
       if (result.kind === 'workflow_channel_mismatch') {
-        await editOrReply(ctx, miniAppWorkflowMessage(), miniAppKeyboard(config));
+        await editOrReply(ctx, miniAppWorkflowMessage(language), miniAppKeyboard(config, language));
         return;
       }
 
       if (result.kind === 'not_allowed') {
-        await ctx.reply('Only confirmed passengers in this pool can reject driver arrival while the request is active.');
+        await ctx.reply(
+          language === 'am'
+            ? 'ጥያቄው ንቁ ሳለ የሾፌር መድረስን አለመቀበል የሚችሉት በዚህ ፑል ውስጥ የተረጋገጡ ተሳፋሪዎች ብቻ ናቸው።'
+            : 'Only confirmed passengers in this pool can reject driver arrival while the request is active.'
+        );
         return;
       }
 
-      await replaceOrReply(ctx, 'Driver arrival was not confirmed. The 10-minute driver timer is still active.');
+      await replaceOrReply(ctx, botLabel('driverArrivalNotConfirmed', language));
       await notifyDriverArrivalRejected(store, result.pool);
     });
   });
@@ -506,37 +567,39 @@ export function createRidePoolBot({ config, store, service, bots }: BotDeps): Te
         return;
       }
 
-      await upsertUserFromContext(ctx, store);
+      const profile = await upsertUserFromContext(ctx, store);
+      const language = profileLanguage(profile);
       const result = await service.requestEarlyDispatch(ctx.match[1], telegramId);
       if (result.kind === 'workflow_channel_mismatch') {
-        await editOrReply(ctx, miniAppWorkflowMessage(), miniAppKeyboard(config));
+        await editOrReply(ctx, miniAppWorkflowMessage(language), miniAppKeyboard(config, language));
         return;
       }
 
       if (result.kind === 'not_allowed') {
-        await ctx.reply('Early dispatch is not available for this pool right now.');
+        await ctx.reply(botLabel('earlyNotAvailable', language));
         return;
       }
 
       if (result.kind === 'early_dispatch_ready') {
-        await editOrReply(ctx, poolReadyPassengerMessage(result.pool));
+        await editOrReply(ctx, poolReadyPassengerMessage(result.pool, language));
         await notifyPoolReady(bot, bots.driverBot ?? bot, config, store, service, result.pool, {
           excludePassengerTelegramIds: [telegramId]
         });
         return;
       }
 
-      await editOrReply(ctx, earlyDispatchStartedMessage(result.pool));
+      await editOrReply(ctx, earlyDispatchStartedMessage(result.pool, language));
+      const targets = await getLanguageTargets(store, result.passengerIdsToNotify);
       await store.enqueueNotifications(
-        result.passengerIdsToNotify.map((passengerId) => ({
+        targets.map(({ telegramId: passengerId, language: passengerLanguage }) => ({
           targetBot: 'passenger' as const,
           chatId: passengerId,
           messageType: 'early_dispatch_request',
           payload: {
-            text: earlyDispatchRequestMessage(result.pool),
+            text: earlyDispatchRequestMessage(result.pool, passengerLanguage),
             replyMarkup: Markup.inlineKeyboard([
-              [Markup.button.callback('Accept Early Dispatch', `early_accept:${result.pool.id}`)],
-              [Markup.button.callback('Reject', `early_reject:${result.pool.id}`)]
+              [Markup.button.callback(botLabel('acceptEarlyDispatch', passengerLanguage), `early_accept:${result.pool.id}`)],
+              [Markup.button.callback(botLabel('reject', passengerLanguage), `early_reject:${result.pool.id}`)]
             ]).reply_markup
           }
         }))
@@ -562,10 +625,11 @@ export function createRidePoolBot({ config, store, service, bots }: BotDeps): Te
       return;
     }
 
-    await upsertUserFromContext(ctx, store);
+    const profile = await upsertUserFromContext(ctx, store);
+    const language = profileLanguage(profile);
     const contact = ctx.message.contact;
     if (contact.user_id && String(contact.user_id) !== telegramId) {
-      await ctx.reply('Please share your own phone number.', profileKeyboard());
+      await ctx.reply(botLabel('shareOwnPhone', language), profileKeyboard(language));
       return;
     }
 
@@ -573,27 +637,30 @@ export function createRidePoolBot({ config, store, service, bots }: BotDeps): Te
     const pendingAction = await store.getPendingPassengerAction(telegramId);
     if (pendingAction) {
       await store.clearPendingPassengerAction(telegramId);
-      await ctx.reply('Phone number saved. Continuing to payment.', Markup.removeKeyboard());
-      await continuePendingPassengerAction(ctx, config, store, service, pendingAction, telegramId);
+      await ctx.reply(botLabel('phoneSavedContinuing', language), Markup.removeKeyboard());
+      await continuePendingPassengerAction(ctx, config, store, service, pendingAction, telegramId, language);
       return;
     }
 
-    await ctx.reply('Phone number saved.', Markup.removeKeyboard());
-    await sendMyPool(ctx, config, store);
+    await ctx.reply(botLabel('phoneSaved', language), Markup.removeKeyboard());
+    await sendMyPool(ctx, config, store, language);
   });
 
   bot.on('location', async (ctx) => {
-    await ctx.reply('Pickup location is not needed. Please share your phone number instead.', Markup.removeKeyboard());
+    const language = await getUserLanguage(store, requireTelegramUserId(ctx));
+    await ctx.reply(botLabel('pickupNotNeeded', language), Markup.removeKeyboard());
   });
 
-  bot.hears('Skip for now', async (ctx) => {
-    await ctx.reply('No problem. You can update your profile later with /profile.', Markup.removeKeyboard());
+  bot.hears([botLabel('skipForNow', 'en'), botLabel('skipForNow', 'am')], async (ctx) => {
+    const language = await getUserLanguage(store, requireTelegramUserId(ctx));
+    await ctx.reply(botLabel('skipProfileLater', language), Markup.removeKeyboard());
   });
 
   bot.catch(async (error, ctx) => {
     console.error('Telegram bot error', error);
     try {
-      await ctx.reply('Sorry, something went wrong. Please try again.');
+      const language = await getUserLanguage(store, requireTelegramUserId(ctx));
+      await ctx.reply(botLabel('genericError', language));
     } catch (replyError) {
       console.error('Could not send error reply', replyError);
     }
@@ -606,16 +673,17 @@ async function sendRouteList(
   ctx: Context,
   config: AppConfig,
   store: PostgresRidePoolStore,
+  language: SupportedLanguageCode,
   editCurrent = false
 ): Promise<void> {
   const routes = await store.listActiveRoutes();
   if (routes.length === 0) {
-    await ctx.reply('No routes are configured yet. Add ROUTES in env and restart the backend.');
+    await ctx.reply(botLabel('noRoutesConfigured', language));
     return;
   }
 
-  const message = routeIntroMessage();
-  const extra = routeKeyboard(routes, config.miniAppUrl);
+  const message = routeIntroMessage(language);
+  const extra = routeKeyboard(routes, config.miniAppUrl, language);
   if (editCurrent) {
     await editOrReply(ctx, message, extra);
     return;
@@ -624,36 +692,56 @@ async function sendRouteList(
   await ctx.reply(message, extra);
 }
 
-function routeKeyboard(routes: Route[], miniAppUrl: string | null) {
+function routeKeyboard(routes: Route[], miniAppUrl: string | null, language: SupportedLanguageCode) {
   return Markup.inlineKeyboard(
     [
-      ...(miniAppUrl ? [[Markup.button.webApp('Open Passenger App', miniAppUrl)]] : []),
-      ...routes.map((route) => [Markup.button.callback(routeButtonLabel(route), `route:${route.id}`)])
+      ...(miniAppUrl ? [[Markup.button.webApp(botLabel('openPassengerApp', language), miniAppUrl)]] : []),
+      [Markup.button.callback(botLabel('languageMenuButton', language), 'language_menu')],
+      ...routes.map((route) => [Markup.button.callback(routeButtonLabel(route, language), `route:${route.id}`)])
     ]
   );
 }
 
-function backToRoutesKeyboard() {
-  return Markup.inlineKeyboard([[Markup.button.callback('Back to Routes', 'routes')]]);
+function backToRoutesKeyboard(language: SupportedLanguageCode) {
+  return Markup.inlineKeyboard([[Markup.button.callback(botLabel('backToRoutes', language), 'routes')]]);
 }
 
-function miniAppWorkflowMessage(): string {
-  return [
-    'This ride is being managed in the Mini App.',
-    'Please continue there until the ride is finished or cancelled.'
-  ].join('\n');
+function miniAppWorkflowMessage(language: SupportedLanguageCode): string {
+  return language === 'am'
+    ? ['ይህ ጉዞ በMini App ውስጥ እየተቀናበረ ነው።', 'ጉዞው እስኪጠናቀቅ ወይም እስኪሰረዝ ድረስ እዚያ ይቀጥሉ።'].join('\n')
+    : [
+        'This ride is being managed in the Mini App.',
+        'Please continue there until the ride is finished or cancelled.'
+      ].join('\n');
 }
 
-function miniAppKeyboard(config: AppConfig) {
+function miniAppKeyboard(config: AppConfig, language: SupportedLanguageCode) {
   return config.miniAppUrl
-    ? Markup.inlineKeyboard([[Markup.button.webApp('Open Passenger App', config.miniAppUrl)]])
+    ? Markup.inlineKeyboard([[Markup.button.webApp(botLabel('openPassengerApp', language), config.miniAppUrl)]])
     : undefined;
+}
+
+function languageKeyboard(language: SupportedLanguageCode) {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback(
+        `${botLabel('languageEnglish', language)}${language === 'en' ? ' ✓' : ''}`,
+        'language:en'
+      ),
+      Markup.button.callback(
+        `${botLabel('languageAmharic', language)}${language === 'am' ? ' ✓' : ''}`,
+        'language:am'
+      )
+    ],
+    [Markup.button.callback(botLabel('backToRoutes', language), 'routes')]
+  ]);
 }
 
 async function requirePhoneBeforePayment(
   ctx: Context,
   store: PostgresRidePoolStore,
-  input: PendingPassengerActionInput
+  input: PendingPassengerActionInput,
+  language: SupportedLanguageCode
 ): Promise<boolean> {
   const profile = await store.getUserProfile(input.telegramId);
   if (profile?.phoneNumber?.trim()) {
@@ -661,8 +749,8 @@ async function requirePhoneBeforePayment(
   }
 
   await store.savePendingPassengerAction(input);
-  await editOrReply(ctx, phoneRequiredBeforePaymentMessage(input.actionType));
-  await ctx.reply('Tap Share Phone below. I will continue to payment automatically after it is saved.', requiredPhoneKeyboard());
+  await editOrReply(ctx, phoneRequiredBeforePaymentMessage(input.actionType, language));
+  await ctx.reply(botLabel('savePhoneFirst', language), requiredPhoneKeyboard(language));
   return true;
 }
 
@@ -670,30 +758,47 @@ function pendingPassengerActionExpiry(): Date {
   return new Date(Date.now() + PENDING_PASSENGER_ACTION_TTL_MS);
 }
 
-function phoneRequiredBeforePaymentMessage(actionType: PendingPassengerAction['actionType']): string {
-  return [
-    'Phone number required.',
-    '',
-    'Share your phone number before payment so the driver can contact you after the pool is assigned.',
-    actionType === 'create_pool'
-      ? 'After you share it, I will create your pool and show the payment card.'
-      : 'After you share it, I will reserve your seat and show the payment card.'
-  ].join('\n');
+function phoneRequiredBeforePaymentMessage(
+  actionType: PendingPassengerAction['actionType'],
+  language: SupportedLanguageCode
+): string {
+  return language === 'am'
+    ? [
+        'ስልክ ቁጥር ያስፈልጋል።',
+        '',
+        'ፑልዎ ከተመደበ በኋላ ሾፌሩ እንዲያገኝዎት ከክፍያ በፊት ስልክ ቁጥርዎን ያጋሩ።',
+        actionType === 'create_pool'
+          ? 'ካጋሩት በኋላ ፑልዎን እፈጥራለሁ እና የክፍያ ካርድ አሳያለሁ።'
+          : 'ካጋሩት በኋላ መቀመጫዎን አስይዛለሁ እና የክፍያ ካርድ አሳያለሁ።'
+      ].join('\n')
+    : [
+        'Phone number required.',
+        '',
+        'Share your phone number before payment so the driver can contact you after the pool is assigned.',
+        actionType === 'create_pool'
+          ? 'After you share it, I will create your pool and show the payment card.'
+          : 'After you share it, I will reserve your seat and show the payment card.'
+      ].join('\n');
 }
 
-function requiredPhoneKeyboard() {
-  return Markup.keyboard([[Markup.button.contactRequest('Share Phone')]])
+function requiredPhoneKeyboard(language: SupportedLanguageCode) {
+  return Markup.keyboard([[Markup.button.contactRequest(botLabel('sharePhone', language))]])
     .oneTime()
     .resize();
 }
 
-async function sendPaymentPrompt(ctx: Context, pool: RidePool, editCurrent = false): Promise<void> {
+async function sendPaymentPrompt(
+  ctx: Context,
+  pool: RidePool,
+  editCurrent = false,
+  language: SupportedLanguageCode
+): Promise<void> {
   const extra = Markup.inlineKeyboard([
-    [Markup.button.callback('I Have Paid', `paid:${pool.id}`)],
-    [Markup.button.callback('Cancel', `cancel:${pool.id}`)]
+    [Markup.button.callback(botLabel('iHavePaid', language), `paid:${pool.id}`)],
+    [Markup.button.callback(botLabel('cancel', language), `cancel:${pool.id}`)]
   ]);
 
-  const message = paymentPromptMessage(pool);
+  const message = paymentPromptMessage(pool, language);
   if (editCurrent) {
     await editOrReply(ctx, message, extra);
     return;
@@ -707,30 +812,31 @@ async function handleCreatePoolResult(
   config: AppConfig,
   store: PostgresRidePoolStore,
   result: Awaited<ReturnType<RidePoolService['createPool']>>,
-  editCurrent: boolean
+  editCurrent: boolean,
+  language: SupportedLanguageCode
 ): Promise<void> {
   if (result.kind === 'route_not_found') {
-    await sendStepMessage(ctx, 'That route is not available right now.', backToRoutesKeyboard(), editCurrent);
+    await sendStepMessage(ctx, botLabel('routeNotAvailable', language), backToRoutesKeyboard(language), editCurrent);
     return;
   }
 
   if (result.kind === 'route_price_not_set') {
-    await sendStepMessage(ctx, 'That route price is not set yet. Please choose another route.', backToRoutesKeyboard(), editCurrent);
+    await sendStepMessage(ctx, botLabel('routePriceNotSet', language), backToRoutesKeyboard(language), editCurrent);
     return;
   }
 
   if (result.kind === 'active_pool_exists') {
-    await sendStepMessage(ctx, 'You already have an active pool. Finish or cancel that one before starting another.', undefined, editCurrent);
-    await sendMyPool(ctx, config, store);
+    await sendStepMessage(ctx, botLabel('activePoolExistsStart', language), undefined, editCurrent);
+    await sendMyPool(ctx, config, store, language);
     return;
   }
 
   if (result.kind === 'workflow_channel_mismatch') {
-    await sendStepMessage(ctx, miniAppWorkflowMessage(), miniAppKeyboard(config), editCurrent);
+    await sendStepMessage(ctx, miniAppWorkflowMessage(language), miniAppKeyboard(config, language), editCurrent);
     return;
   }
 
-  await sendPaymentPrompt(ctx, result.pool, editCurrent);
+  await sendPaymentPrompt(ctx, result.pool, editCurrent, language);
 }
 
 async function handleJoinPoolResult(
@@ -738,21 +844,22 @@ async function handleJoinPoolResult(
   config: AppConfig,
   store: PostgresRidePoolStore,
   result: Awaited<ReturnType<RidePoolService['joinPool']>>,
-  editCurrent: boolean
+  editCurrent: boolean,
+  language: SupportedLanguageCode
 ): Promise<void> {
   if (result.kind === 'pool_not_joinable') {
-    await sendStepMessage(ctx, 'Sorry, this pool is no longer available.', backToRoutesKeyboard(), editCurrent);
+    await sendStepMessage(ctx, botLabel('poolNoLongerAvailable', language), backToRoutesKeyboard(language), editCurrent);
     return;
   }
 
   if (result.kind === 'active_pool_exists') {
-    await sendStepMessage(ctx, 'You already have an active pool. Finish or cancel that one before joining another.', undefined, editCurrent);
-    await sendMyPool(ctx, config, store);
+    await sendStepMessage(ctx, botLabel('activePoolExistsJoin', language), undefined, editCurrent);
+    await sendMyPool(ctx, config, store, language);
     return;
   }
 
   if (result.kind === 'workflow_channel_mismatch') {
-    await sendStepMessage(ctx, miniAppWorkflowMessage(), miniAppKeyboard(config), editCurrent);
+    await sendStepMessage(ctx, miniAppWorkflowMessage(language), miniAppKeyboard(config, language), editCurrent);
     return;
   }
 
@@ -764,12 +871,13 @@ async function handleJoinPoolResult(
       result.pool,
       result.passenger,
       result.pool.passengerCount,
-      editCurrent
+      editCurrent,
+      language
     );
     return;
   }
 
-  await sendPaymentPrompt(ctx, result.pool, editCurrent);
+  await sendPaymentPrompt(ctx, result.pool, editCurrent, language);
 }
 
 async function continuePendingPassengerAction(
@@ -778,21 +886,22 @@ async function continuePendingPassengerAction(
   store: PostgresRidePoolStore,
   service: RidePoolService,
   action: PendingPassengerAction,
-  telegramId: string
+  telegramId: string,
+  language: SupportedLanguageCode
 ): Promise<void> {
   if (action.actionType === 'create_pool' && action.routeId) {
     const result = await service.createPool(action.routeId, telegramId);
-    await handleCreatePoolResult(ctx, config, store, result, false);
+    await handleCreatePoolResult(ctx, config, store, result, false, language);
     return;
   }
 
   if (action.actionType === 'join_pool' && action.poolId) {
     const result = await service.joinPool(action.poolId, telegramId);
-    await handleJoinPoolResult(ctx, config, store, result, false);
+    await handleJoinPoolResult(ctx, config, store, result, false, language);
     return;
   }
 
-  await ctx.reply('Your saved action expired. Please choose a route again.', backToRoutesKeyboard());
+  await ctx.reply(botLabel('actionExpired', language), backToRoutesKeyboard(language));
 }
 
 async function sendStepMessage(
@@ -816,12 +925,13 @@ async function sendPassengerConfirmed(
   pool: RidePool,
   passenger: PoolPassenger,
   passengerCount: number,
-  editCurrent = false
+  editCurrent = false,
+  language: SupportedLanguageCode = 'en'
 ): Promise<void> {
-  const message = passengerConfirmedMessage(pool, passengerCount, config.poolSize);
+  const message = passengerConfirmedMessage(pool, passengerCount, config.poolSize, language);
   const canRequestEarlyDispatch = await canShowEarlyDispatchButton(store, pool, passenger, config.poolSize);
   const extra = canRequestEarlyDispatch
-    ? Markup.inlineKeyboard([[Markup.button.callback("Let's Go Now", `early:${pool.id}`)]])
+    ? Markup.inlineKeyboard([[Markup.button.callback(botLabel('letGoNow', language), `early:${pool.id}`)]])
     : undefined;
 
   if (editCurrent) {
@@ -852,7 +962,12 @@ async function canShowEarlyDispatchButton(
   return Boolean(profile?.phoneNumber?.trim());
 }
 
-async function sendMyPool(ctx: Context, config: AppConfig, store: PostgresRidePoolStore): Promise<void> {
+async function sendMyPool(
+  ctx: Context,
+  config: AppConfig,
+  store: PostgresRidePoolStore,
+  language: SupportedLanguageCode
+): Promise<void> {
   const telegramId = requireTelegramUserId(ctx);
   if (!telegramId) {
     return;
@@ -860,50 +975,54 @@ async function sendMyPool(ctx: Context, config: AppConfig, store: PostgresRidePo
 
   const active = await store.getActivePoolForPassenger(telegramId);
   if (!active) {
-    await ctx.reply('You do not have an active pool right now.', backToRoutesKeyboard());
+    await ctx.reply(botLabel('noActivePool', language), backToRoutesKeyboard(language));
     return;
   }
 
   if (active.pool.workflowChannel === 'mini_app') {
-    await ctx.reply(miniAppWorkflowMessage(), miniAppKeyboard(config));
+    await ctx.reply(miniAppWorkflowMessage(language), miniAppKeyboard(config, language));
     return;
   }
 
   const buttons = [];
   if (await canShowEarlyDispatchButton(store, active.pool, active.passenger, config.poolSize)) {
-    buttons.push([Markup.button.callback("Let's Go Now", `early:${active.pool.id}`)]);
+    buttons.push([Markup.button.callback(botLabel('letGoNow', language), `early:${active.pool.id}`)]);
   }
   if (
     ['open', 'ready'].includes(active.pool.status) &&
     !active.pool.driverTelegramId &&
     ['pending', 'confirmed'].includes(active.passenger.paymentStatus)
   ) {
-    buttons.push([Markup.button.callback('Cancel', `cancel:${active.pool.id}`)]);
+    buttons.push([Markup.button.callback(botLabel('cancel', language), `cancel:${active.pool.id}`)]);
   }
   if (
     active.pool.status === 'arrival_requested' &&
     active.passenger.paymentStatus === 'confirmed'
   ) {
-    buttons.push([Markup.button.callback('Confirm Arrival', `confirm_arrival:${active.pool.id}`)]);
-    buttons.push([Markup.button.callback('Driver Not Here', `reject_arrival:${active.pool.id}`)]);
+    buttons.push([Markup.button.callback(botLabel('confirmArrival', language), `confirm_arrival:${active.pool.id}`)]);
+    buttons.push([Markup.button.callback(botLabel('driverNotHere', language), `reject_arrival:${active.pool.id}`)]);
   }
 
   await ctx.reply(
-    myPoolMessage(active.pool, active.passenger.isCaptain, config.poolSize),
+    myPoolMessage(active.pool, active.passenger.isCaptain, config.poolSize, language),
     buttons.length ? Markup.inlineKeyboard(buttons) : undefined
   );
 }
 
-async function sendProfilePrompt(ctx: Context, store: PostgresRidePoolStore): Promise<void> {
+async function sendProfilePrompt(
+  ctx: Context,
+  store: PostgresRidePoolStore,
+  language: SupportedLanguageCode
+): Promise<void> {
   const telegramId = requireTelegramUserId(ctx);
   const profile = telegramId ? await store.getUserProfile(telegramId) : null;
-  await ctx.reply([profileStatusMessage(profile), '', profilePromptMessage()].join('\n'), profileKeyboard());
+  await ctx.reply([profileStatusMessage(profile, language), '', profilePromptMessage(language)].join('\n'), profileKeyboard(language));
 }
 
-function profileKeyboard() {
+function profileKeyboard(language: SupportedLanguageCode) {
   return Markup.keyboard([
-    [Markup.button.contactRequest('Share Phone')],
-    ['Skip for now']
+    [Markup.button.contactRequest(botLabel('sharePhone', language))],
+    [botLabel('skipForNow', language)]
   ])
     .oneTime()
     .resize();
@@ -922,6 +1041,7 @@ async function notifyPoolReady(
   const passengerIds = (await store.getConfirmedPassengerTelegramIds(pool.id)).filter(
     (telegramId) => !excludedPassengerIds.has(telegramId)
   );
+  const passengerTargets = await getLanguageTargets(store, passengerIds);
   await store.enqueueNotifications([
     {
       targetBot: driverBot === passengerBot ? 'passenger' : 'driver',
@@ -929,11 +1049,11 @@ async function notifyPoolReady(
       messageType: 'driver_pool_ready',
       payload: driverAlertPayload(pool, driverGroupAlertMessage(pool))
     },
-    ...passengerIds.map((telegramId) => ({
+    ...passengerTargets.map(({ telegramId, language }) => ({
       targetBot: 'passenger' as const,
       chatId: telegramId,
       messageType: 'pool_ready',
-      payload: { text: poolReadyPassengerMessage(pool) }
+      payload: { text: poolReadyPassengerMessage(pool, language) }
     }))
   ]);
 }
@@ -954,41 +1074,46 @@ async function handleEarlyDispatchVote(
     return;
   }
 
-  await upsertUserFromContext(ctx, store);
+  const profile = await upsertUserFromContext(ctx, store);
+  const language = profileLanguage(profile);
   const result = await service.voteEarlyDispatch(poolId, telegramId, vote);
   if (result.kind === 'workflow_channel_mismatch') {
-    await editOrReply(ctx, miniAppWorkflowMessage(), miniAppKeyboard(config));
+    await editOrReply(ctx, miniAppWorkflowMessage(language), miniAppKeyboard(config, language));
     return;
   }
 
   if (result.kind === 'not_allowed') {
-    await editOrReply(ctx, 'This early dispatch vote is no longer active.');
+    await editOrReply(
+      ctx,
+      language === 'am' ? 'ይህ የቀድሞ መላክ ድምጽ ከእንግዲህ ንቁ አይደለም።' : 'This early dispatch vote is no longer active.'
+    );
     return;
   }
 
   if (result.kind === 'early_dispatch_cancelled') {
-    await editOrReply(ctx, 'You rejected early dispatch.');
+    await editOrReply(ctx, botLabel('earlyRejected', language));
     const passengerIds = await store.getConfirmedPassengerTelegramIds(result.pool.id);
+    const targets = await getLanguageTargets(store, passengerIds);
     await store.enqueueNotifications(
-      passengerIds.map((passengerId) => ({
+      targets.map(({ telegramId: passengerId, language: passengerLanguage }) => ({
         targetBot: 'passenger' as const,
         chatId: passengerId,
         messageType: 'early_dispatch_cancelled',
-        payload: { text: earlyDispatchCancelledMessage(result.pool) }
+        payload: { text: earlyDispatchCancelledMessage(result.pool, passengerLanguage) }
       }))
     );
     return;
   }
 
   if (result.kind === 'early_dispatch_ready') {
-    await editOrReply(ctx, poolReadyPassengerMessage(result.pool));
+    await editOrReply(ctx, poolReadyPassengerMessage(result.pool, language));
     await notifyPoolReady(passengerBot, driverBot, config, store, service, result.pool, {
       excludePassengerTelegramIds: [telegramId]
     });
     return;
   }
 
-  await editOrReply(ctx, 'Your early dispatch vote was saved.');
+  await editOrReply(ctx, botLabel('earlyVoteSaved', language));
 }
 
 async function replaceOrReply(ctx: Context, message: string): Promise<void> {
@@ -1018,14 +1143,14 @@ async function notifyPassengersDriverArrivalConfirmed(
   captainTelegramId: string
 ): Promise<void> {
   const passengerIds = await store.getConfirmedPassengerTelegramIds(pool.id);
+  const targets = await getLanguageTargets(store, passengerIds.filter((telegramId) => telegramId !== captainTelegramId));
   await store.enqueueNotifications(
-    passengerIds
-      .filter((telegramId) => telegramId !== captainTelegramId)
-      .map((telegramId) => ({
+    targets
+      .map(({ telegramId, language }) => ({
         targetBot: 'passenger' as const,
         chatId: telegramId,
         messageType: 'arrival_confirmed_passenger',
-        payload: { text: driverArrivalConfirmedPassengerMessage(pool) }
+        payload: { text: driverArrivalConfirmedPassengerMessage(pool, language) }
       }))
   );
 }
@@ -1035,11 +1160,12 @@ async function notifyDriverArrivalConfirmed(store: PostgresRidePoolStore, pool: 
     return;
   }
 
+  const language = await getUserLanguage(store, pool.driverTelegramId);
   await store.enqueueNotification({
     targetBot: 'driver',
     chatId: pool.driverTelegramId,
     messageType: 'arrival_confirmed_driver',
-    payload: { text: driverArrivalConfirmedDriverMessage(pool) }
+    payload: { text: driverArrivalConfirmedDriverMessage(pool, language) }
   });
 }
 
@@ -1048,14 +1174,15 @@ async function notifyDriverArrivalRejected(store: PostgresRidePoolStore, pool: R
     return;
   }
 
+  const language = await getUserLanguage(store, pool.driverTelegramId);
   await store.enqueueNotification({
     targetBot: 'driver',
     chatId: pool.driverTelegramId,
     messageType: 'arrival_rejected_driver',
     payload: {
-      text: driverArrivalRejectedDriverMessage(pool),
+      text: driverArrivalRejectedDriverMessage(pool, language),
       replyMarkup: Markup.inlineKeyboard([
-        [Markup.button.callback('I Arrived', `arrived:${pool.id}`)]
+        [Markup.button.callback(botLabel('iArrived', language), `arrived:${pool.id}`)]
       ]).reply_markup
     }
   });
@@ -1068,12 +1195,13 @@ async function notifyTripCompleted(
   pool: RidePool
 ): Promise<void> {
   const passengerIds = await store.getConfirmedPassengerTelegramIds(pool.id);
+  const targets = await getLanguageTargets(store, passengerIds);
   await store.enqueueNotifications(
-    passengerIds.map((telegramId) => ({
+    targets.map(({ telegramId, language }) => ({
       targetBot: 'passenger' as const,
       chatId: telegramId,
       messageType: 'trip_completed_passenger',
-      payload: { text: tripCompletedPassengerMessage(pool) }
+      payload: { text: tripCompletedPassengerMessage(pool, language) }
     }))
   );
 
@@ -1101,22 +1229,27 @@ async function notifyPassengersDriverAssigned(
   driverProfile: TelegramUserProfile
 ): Promise<void> {
   const passengerIds = await store.getConfirmedPassengerTelegramIds(pool.id);
+  const targets = await getLanguageTargets(store, passengerIds);
   await store.enqueueNotifications(
-    passengerIds.map((telegramId) => ({
+    targets.map(({ telegramId, language }) => ({
       targetBot: 'passenger' as const,
       chatId: telegramId,
       messageType: 'driver_assigned_passenger',
-      payload: { text: passengerDriverAssignedMessage(pool, driverProfile) }
+      payload: { text: passengerDriverAssignedMessage(pool, driverProfile, language) }
     }))
   );
 }
 
-function driverAlertPayload(pool: RidePool, text: string): Record<string, unknown> {
+function driverAlertPayload(
+  pool: RidePool,
+  text: string,
+  language: SupportedLanguageCode = 'en'
+): Record<string, unknown> {
   return {
     poolId: pool.id,
     text,
     replyMarkup: Markup.inlineKeyboard([
-      [Markup.button.callback('Accept Job', `accept:${pool.id}`)]
+      [Markup.button.callback(botLabel('acceptJob', language), `accept:${pool.id}`)]
     ]).reply_markup
   };
 }
@@ -1172,10 +1305,11 @@ async function runTelegramAction(
     });
   } catch (error) {
     if (error instanceof Error && error.message.startsWith('Action is already being processed')) {
+      const language = await getUserLanguage(store, telegramId);
       try {
-        await ctx.answerCbQuery('Already processing. Please wait.');
+        await ctx.answerCbQuery(botLabel('alreadyProcessing', language));
       } catch {
-        await ctx.reply('Already processing. Please wait.');
+        await ctx.reply(botLabel('alreadyProcessing', language));
       }
       return;
     }

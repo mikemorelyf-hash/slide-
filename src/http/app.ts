@@ -8,10 +8,12 @@ import { Markup, type Context, type Telegraf } from 'telegraf';
 import type { AppConfig } from '../config/env.js';
 import { PostgresRidePoolStore } from '../db/postgresRidePoolStore.js';
 import { createRequestHash, runIdempotent } from '../domain/idempotency.js';
+import { isSupportedLanguageCode } from '../domain/language.js';
 import { RidePoolService } from '../domain/ridePoolService.js';
 import type { RidePool, WorkflowChannel } from '../domain/types.js';
 import { validateTelegramInitData } from '../security/telegramInitData.js';
 import {
+  botLabel,
   driverArrivalConfirmedDriverMessage,
   driverArrivalConfirmedPassengerMessage,
   driverArrivalRejectedDriverMessage,
@@ -20,6 +22,7 @@ import {
   earlyDispatchRequestMessage,
   poolReadyPassengerMessage
 } from '../bot/messages.js';
+import { getLanguageTargets, getUserLanguage } from '../bot/language.js';
 import {
   buildAdminOverview,
   isAdminTelegramId,
@@ -324,6 +327,26 @@ export function createHttpApp({ config, store, service, bot, driverBot }: HttpAp
       }
 
       await store.updateUserContact(telegramId, phoneNumber);
+      await sendPassengerState(req, res, config, store);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/api/passenger/language', requireMiniAppAuth(config, store), async (req, res, next) => {
+    try {
+      const telegramId = getAuthenticatedTelegramId(req, res);
+      if (!telegramId) {
+        return;
+      }
+
+      const languageCode = parseStringBody(req.body, 'languageCode');
+      if (!isSupportedLanguageCode(languageCode)) {
+        res.status(400).json({ error: 'invalid_language_code' });
+        return;
+      }
+
+      await store.updateUserLanguage(telegramId, languageCode);
       await sendPassengerState(req, res, config, store);
     } catch (error) {
       next(error);
@@ -888,6 +911,7 @@ async function notifyPoolReady(
   pool: RidePool
 ): Promise<void> {
   const passengerIds = await store.getConfirmedPassengerTelegramIds(pool.id);
+  const passengerTargets = await getLanguageTargets(store, passengerIds);
   await store.enqueueNotifications([
     {
       targetBot: driverBot === passengerBot ? 'passenger' : 'driver',
@@ -895,11 +919,11 @@ async function notifyPoolReady(
       messageType: 'driver_pool_ready',
       payload: driverAlertPayload(pool, driverGroupAlertMessage(pool))
     },
-    ...passengerIds.map((passengerId) => ({
+    ...passengerTargets.map(({ telegramId: passengerId, language }) => ({
       targetBot: 'passenger' as const,
       chatId: passengerId,
       messageType: 'pool_ready',
-      payload: { text: poolReadyPassengerMessage(pool) }
+      payload: { text: poolReadyPassengerMessage(pool, language) }
     }))
   ]);
 }
@@ -909,16 +933,17 @@ async function notifyEarlyDispatchVoteRequest(
   pool: RidePool,
   passengerIds: string[]
 ): Promise<void> {
+  const targets = await getLanguageTargets(store, passengerIds);
   await store.enqueueNotifications(
-    passengerIds.map((passengerId) => ({
+    targets.map(({ telegramId: passengerId, language }) => ({
       targetBot: 'passenger' as const,
       chatId: passengerId,
       messageType: 'early_dispatch_request',
       payload: {
-        text: earlyDispatchRequestMessage(pool),
+        text: earlyDispatchRequestMessage(pool, language),
         replyMarkup: Markup.inlineKeyboard([
-          [Markup.button.callback('Accept Early Dispatch', `early_accept:${pool.id}`)],
-          [Markup.button.callback('Reject', `early_reject:${pool.id}`)]
+          [Markup.button.callback(botLabel('acceptEarlyDispatch', language), `early_accept:${pool.id}`)],
+          [Markup.button.callback(botLabel('reject', language), `early_reject:${pool.id}`)]
         ]).reply_markup
       }
     }))
@@ -931,12 +956,13 @@ async function notifyEarlyDispatchCancelled(
   pool: RidePool
 ): Promise<void> {
   const passengerIds = await store.getConfirmedPassengerTelegramIds(pool.id);
+  const targets = await getLanguageTargets(store, passengerIds);
   await store.enqueueNotifications(
-    passengerIds.map((passengerId) => ({
+    targets.map(({ telegramId: passengerId, language }) => ({
       targetBot: 'passenger' as const,
       chatId: passengerId,
       messageType: 'early_dispatch_cancelled',
-      payload: { text: earlyDispatchCancelledMessage(pool) }
+      payload: { text: earlyDispatchCancelledMessage(pool, language) }
     }))
   );
 }
@@ -949,23 +975,27 @@ async function notifyArrivalConfirmed(
   confirmerTelegramId: string
 ): Promise<void> {
   const passengerIds = await store.getConfirmedPassengerTelegramIds(pool.id);
+  const targets = await getLanguageTargets(
+    store,
+    passengerIds.filter((passengerId) => passengerId !== confirmerTelegramId)
+  );
   await store.enqueueNotifications(
-    passengerIds
-      .filter((passengerId) => passengerId !== confirmerTelegramId)
-      .map((passengerId) => ({
+    targets
+      .map(({ telegramId: passengerId, language }) => ({
         targetBot: 'passenger' as const,
         chatId: passengerId,
         messageType: 'arrival_confirmed_passenger',
-        payload: { text: driverArrivalConfirmedPassengerMessage(pool) }
+        payload: { text: driverArrivalConfirmedPassengerMessage(pool, language) }
       }))
   );
 
   if (pool.driverTelegramId) {
+    const language = await getUserLanguage(store, pool.driverTelegramId);
     await store.enqueueNotification({
       targetBot: driverBot === passengerBot ? 'passenger' : 'driver',
       chatId: pool.driverTelegramId,
       messageType: 'arrival_confirmed_driver',
-      payload: { text: driverArrivalConfirmedDriverMessage(pool) }
+      payload: { text: driverArrivalConfirmedDriverMessage(pool, language) }
     });
   }
 }
@@ -975,14 +1005,15 @@ async function notifyArrivalRejected(store: PostgresRidePoolStore, pool: RidePoo
     return;
   }
 
+  const language = await getUserLanguage(store, pool.driverTelegramId);
   await store.enqueueNotification({
     targetBot: 'driver',
     chatId: pool.driverTelegramId,
     messageType: 'arrival_rejected_driver',
     payload: {
-      text: driverArrivalRejectedDriverMessage(pool),
+      text: driverArrivalRejectedDriverMessage(pool, language),
       replyMarkup: Markup.inlineKeyboard([
-        [Markup.button.callback('I Arrived', `arrived:${pool.id}`)]
+        [Markup.button.callback(botLabel('iArrived', language), `arrived:${pool.id}`)]
       ]).reply_markup
     }
   });
@@ -993,7 +1024,7 @@ function driverAlertPayload(pool: RidePool, text: string): Record<string, unknow
     poolId: pool.id,
     text,
     replyMarkup: Markup.inlineKeyboard([
-      [Markup.button.callback('Accept Job', `accept:${pool.id}`)]
+      [Markup.button.callback(botLabel('acceptJob'), `accept:${pool.id}`)]
     ]).reply_markup
   };
 }

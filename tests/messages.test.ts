@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   adminRouteSummary,
   driverManifestMessage,
+  languageMenuMessage,
   passengerConfirmedMessage,
   paymentPromptMessage,
   profilePromptMessage,
@@ -130,5 +131,11 @@ describe('route price messages', () => {
 
     expect(tripCompletedDriverMessage(pool)).toContain('Congrats');
     expect(tripCompletedDriverMessage(pool)).toContain('Admin has been notified');
+  });
+
+  it('can render passenger bot copy in Amharic', () => {
+    expect(languageMenuMessage('am')).toContain('ቋንቋ');
+    expect(paymentPromptMessage(pool, 'am')).toContain('ዋጋ: 120 ETB');
+    expect(passengerConfirmedMessage(pool, 1, 4, 'am')).toContain('ክፍያ ተረጋግጧል');
   });
 });

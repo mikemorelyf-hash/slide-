@@ -1,5 +1,7 @@
 import type { Context } from 'telegraf';
 
+import type { SupportedLanguageCode } from '../domain/language.js';
+
 interface DriverAccessStore {
   hasDriverBotStarted(telegramId: string): Promise<boolean>;
 }
@@ -10,23 +12,32 @@ type ReplyContext = Pick<Context, 'chat' | 'reply'>;
 export async function ensureDriverBotStarted(
   ctx: CallbackContext,
   store: DriverAccessStore,
-  telegramId: string
+  telegramId: string,
+  language: SupportedLanguageCode = 'en'
 ): Promise<boolean> {
   if (await store.hasDriverBotStarted(telegramId)) {
     return true;
   }
 
-  await ctx.answerCbQuery('Open the driver bot and press Start first.', {
+  await ctx.answerCbQuery(
+    language === 'am' ? 'የሾፌር ቦቱን ክፈቱና Start ይጫኑ።' : 'Open the driver bot and press Start first.',
+    {
     show_alert: true
-  });
+    }
+  );
   return false;
 }
 
-export async function ensurePrivateDriverChat(ctx: ReplyContext): Promise<boolean> {
+export async function ensurePrivateDriverChat(
+  ctx: ReplyContext,
+  language: SupportedLanguageCode = 'en'
+): Promise<boolean> {
   if (ctx.chat?.type === 'private') {
     return true;
   }
 
-  await ctx.reply('Please use the driver bot private chat for this.');
+  await ctx.reply(
+    language === 'am' ? 'እባክዎ ለዚህ የሾፌር ቦት የግል ቻት ይጠቀሙ።' : 'Please use the driver bot private chat for this.'
+  );
   return false;
 }

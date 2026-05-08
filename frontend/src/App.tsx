@@ -20,7 +20,7 @@ import {
   WalletCards,
   Zap
 } from 'lucide-react';
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { createContext, FormEvent, useContext, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 
 import AdminApp from './AdminApp';
@@ -33,6 +33,7 @@ import {
   joinSelectedPool,
   rejectArrival,
   requestEarlyDispatch,
+  saveLanguage,
   savePhone,
   startNewPool
 } from './api';
@@ -50,6 +51,13 @@ import {
   shouldShowCompletedTrip
 } from './appState';
 import { getTelegramInitData, notifyError, notifySuccess, prepareTelegramShell } from './telegram';
+import {
+  createTranslator,
+  LANGUAGE_STORAGE_KEY,
+  normalizeLanguageCode,
+  type LanguageCode,
+  type Translator
+} from './i18n';
 import type {
   PassengerAvailablePool,
   PassengerPoolView,
@@ -75,6 +83,22 @@ type BusyAction =
 const SIDE_LOGO_SRC = '/side-logo.png';
 const DISMISSED_COMPLETED_POOL_STORAGE_KEY = 'side.dismissedCompletedPoolId';
 
+interface LanguageContextValue {
+  language: LanguageCode;
+  t: Translator;
+  setLanguage: (language: LanguageCode) => void;
+}
+
+const LanguageContext = createContext<LanguageContextValue>({
+  language: 'en',
+  t: createTranslator('en'),
+  setLanguage: () => undefined
+});
+
+function useLanguageCopy(): LanguageContextValue {
+  return useContext(LanguageContext);
+}
+
 export default function App() {
   const isAdminPath = typeof window !== 'undefined' && window.location.pathname.startsWith('/admin');
   return isAdminPath ? <AdminApp /> : <PassengerApp />;
@@ -82,6 +106,11 @@ export default function App() {
 
 function PassengerApp() {
   const [initData] = useState(() => getTelegramInitData());
+  const [language, setLanguageState] = useState<LanguageCode>(() =>
+    typeof window === 'undefined'
+      ? 'en'
+      : normalizeLanguageCode(window.localStorage.getItem(LANGUAGE_STORAGE_KEY))
+  );
   const [state, setState] = useState<PassengerState | null>(null);
   const [routePools, setRoutePools] = useState<RoutePoolsResponse | null>(null);
   const [showIntro, setShowIntro] = useState(true);
@@ -96,10 +125,31 @@ function PassengerApp() {
   const showCompletedTrip = shouldShowCompletedTrip(completedPool, dismissedCompletedPoolId);
   const hasPhone = passengerHasPhone(state?.user ?? null);
   const lockedToTelegram = isLockedToTelegramWorkflow(activePool);
+  const t = useMemo(() => createTranslator(language), [language]);
+  const languageContext = useMemo(
+    () => ({
+      language,
+      t,
+      setLanguage: changeLanguage
+    }),
+    [language, t, initData]
+  );
 
   useEffect(() => {
     prepareTelegramShell();
   }, []);
+
+  useEffect(() => {
+    const profileLanguage = state?.user?.languageCode;
+    if (!profileLanguage) {
+      return;
+    }
+
+    const normalized = normalizeLanguageCode(profileLanguage);
+    if (normalized !== language) {
+      persistLanguage(normalized);
+    }
+  }, [state?.user?.languageCode]);
 
   useEffect(() => {
     if (!initData) {
@@ -193,7 +243,7 @@ function PassengerApp() {
         notifySuccess();
       }
     } catch (caught) {
-      setError(resolveMiniAppError(caught));
+      setError(resolveMiniAppError(caught, 'passenger', language));
       notifyError();
     } finally {
       if (action) {
@@ -212,7 +262,7 @@ function PassengerApp() {
     event.preventDefault();
     const trimmedPhone = phoneNumber.trim();
     if (!trimmedPhone) {
-      setError('Phone number is required.');
+      setError(language === 'am' ? 'ስልክ ቁጥር ያስፈልጋል።' : 'Phone number is required.');
       return;
     }
 
@@ -224,16 +274,36 @@ function PassengerApp() {
     window.localStorage.setItem(DISMISSED_COMPLETED_POOL_STORAGE_KEY, poolId);
   }
 
-  if (!initData) {
-    return <AuthRequired />;
+  function persistLanguage(nextLanguage: LanguageCode) {
+    setLanguageState(nextLanguage);
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(LANGUAGE_STORAGE_KEY, nextLanguage);
+    }
   }
 
-  if (showIntro) {
-    return <IntroScreen onStart={() => setShowIntro(false)} />;
+  function changeLanguage(nextLanguage: LanguageCode) {
+    persistLanguage(nextLanguage);
+
+    if (!initData) {
+      return;
+    }
+
+    void runAction(null, async () => {
+      setState(await saveLanguage(initData, nextLanguage));
+    });
   }
 
   return (
+    <LanguageContext.Provider value={languageContext}>
+      {!initData ? (
+        <AuthRequired />
+      ) : showIntro ? (
+        <IntroScreen onStart={() => setShowIntro(false)} />
+      ) : (
     <main className="app-shell side-app-shell">
+      <div className="side-language-row">
+        <LanguageToggle />
+      </div>
       {error ? <InlineAlert message={error} /> : null}
       {busy === 'refresh' && !state ? <LoadingState /> : null}
 
@@ -250,7 +320,7 @@ function PassengerApp() {
           {!activePool && !showCompletedTrip && !routePools ? (
             <RouteList
               routes={state.routes}
-              userName={formatPassengerName(state.user)}
+              userName={formatPassengerName(state.user, language)}
               busy={busy}
               onRefresh={() => refreshState()}
               onSelect={loadRoutePools}
@@ -312,25 +382,57 @@ function PassengerApp() {
         </>
       ) : null}
     </main>
+      )}
+    </LanguageContext.Provider>
   );
 }
 
 function IntroScreen({ onStart }: { onStart: () => void }) {
+  const { t } = useLanguageCopy();
+
   return (
     <main className="side-intro">
+      <div className="side-intro-language">
+        <LanguageToggle />
+      </div>
       <div className="side-intro-logo-wrap">
         <img className="side-intro-logo" src={SIDE_LOGO_SRC} alt="Side" />
       </div>
-      <p>Ride Together. Save More.</p>
+      <p>{t('introTagline')}</p>
       <div className="side-intro-dots" aria-hidden="true">
         <span />
         <span />
         <span />
       </div>
       <button className="side-main-button" type="button" onClick={onStart}>
-        Get Started
+        {t('getStarted')}
       </button>
     </main>
+  );
+}
+
+function LanguageToggle() {
+  const { language, setLanguage, t } = useLanguageCopy();
+
+  return (
+    <div className="side-language-toggle" aria-label={t('language')}>
+      <button
+        className={language === 'en' ? 'active' : undefined}
+        type="button"
+        onClick={() => setLanguage('en')}
+        aria-pressed={language === 'en'}
+      >
+        {t('englishShort')}
+      </button>
+      <button
+        className={language === 'am' ? 'active' : undefined}
+        type="button"
+        onClick={() => setLanguage('am')}
+        aria-pressed={language === 'am'}
+      >
+        {t('amharicShort')}
+      </button>
+    </div>
   );
 }
 
@@ -347,21 +449,23 @@ function RouteList({
   onRefresh: () => void;
   onSelect: (routeId: string) => void;
 }) {
+  const { language, t } = useLanguageCopy();
+
   return (
     <>
-      <SideHeader title="Side Ride Pool" subtitle="Telegram Mini App" onRefresh={onRefresh} />
+      <SideHeader title="Side Ride Pool" subtitle={t('telegramMiniApp')} onRefresh={onRefresh} />
       <section className="side-hero-card">
         <div>
-          <h2>Hi {userName.replace(/^@/, '')}</h2>
-          <p>Where are we heading?</p>
+          <h2>{t('hiName', { name: userName.replace(/^@/, '') })}</h2>
+          <p>{t('chooseRoutePrompt')}</p>
         </div>
         <MapPin size={29} />
       </section>
 
       <section className="side-section">
         <div className="side-section-title">
-          <h2>Popular Routes</h2>
-          <span>See all</span>
+          <h2>{t('popularRoutes')}</h2>
+          <span>{t('seeAll')}</span>
         </div>
         <div className="side-route-list">
           {routes.map((route) => (
@@ -375,12 +479,12 @@ function RouteList({
               <span>
                 <strong>{route.name}</strong>
                 <small>
-                  <UsersRound size={13} /> {isRouteBookable(route) ? 'Choose active pool' : 'Price not set'}
+                  <UsersRound size={13} /> {isRouteBookable(route) ? t('chooseActivePool') : t('priceNotSet')}
                 </small>
               </span>
               <span className="side-price-stack">
-                <strong>{formatPrice(route)}</strong>
-                <small>5-10 min</small>
+                <strong>{formatPrice(route, language)}</strong>
+                <small>{t('eta')}</small>
               </span>
             </button>
           ))}
@@ -388,13 +492,13 @@ function RouteList({
       </section>
 
       <section className="side-how">
-        <h2>How it works</h2>
+        <h2>{t('howItWorks')}</h2>
         <div className="side-how-grid">
-          <HowItem icon={<RouteIcon size={17} />} label="Choose Route" />
-          <HowItem icon={<UsersRound size={17} />} label="Join Pool" />
-          <HowItem icon={<CreditCard size={17} />} label="Pay & Get PIN" />
-          <HowItem icon={<CarFront size={17} />} label="Track Travel" />
-          <HowItem icon={<CheckCircle2 size={17} />} label="Confirm Arrival" />
+          <HowItem icon={<RouteIcon size={17} />} label={t('chooseRoute')} />
+          <HowItem icon={<UsersRound size={17} />} label={t('joinPool')} />
+          <HowItem icon={<CreditCard size={17} />} label={t('payAndPin')} />
+          <HowItem icon={<CarFront size={17} />} label={t('trackTravel')} />
+          <HowItem icon={<CheckCircle2 size={17} />} label={t('confirmArrival')} />
         </div>
       </section>
     </>
@@ -418,9 +522,16 @@ function ActivePoolsScreen({
   onJoin: (poolId: string) => void;
   onStartNew: () => void;
 }) {
+  const { language, t } = useLanguageCopy();
+
   return (
     <>
-      <ScreenHeader title={`${response.route.name} Pools`} subtitle="Choose an active pool to join" onBack={onBack} onRefresh={onRefresh} />
+      <ScreenHeader
+        title={`${response.route.name} ${language === 'am' ? 'ፑሎች' : 'Pools'}`}
+        subtitle={t('chooseActivePool')}
+        onBack={onBack}
+        onRefresh={onRefresh}
+      />
       <section className="side-section">
         <div className="side-pool-list">
           {response.pools.length ? (
@@ -437,13 +548,13 @@ function ActivePoolsScreen({
           ) : (
             <div className="side-empty-card">
               <UsersRound size={24} />
-              <strong>No paid pools yet</strong>
-              <span>Start one and confirm payment so other passengers can join.</span>
+              <strong>{t('noPaidPools')}</strong>
+              <span>{t('startOne')}</span>
             </div>
           )}
         </div>
         <button className="side-outline-button side-start-pool" type="button" onClick={onStartNew} disabled={busy === 'start'}>
-          <Plus size={18} /> Start New Pool
+          <Plus size={18} /> {t('startNewPool')}
         </button>
       </section>
     </>
@@ -465,13 +576,15 @@ function PhoneRequiredScreen({
   onSubmitPhone: (event: FormEvent<HTMLFormElement>) => void;
   onBack: () => void;
 }) {
+  const { t } = useLanguageCopy();
+
   return (
     <>
-      <ScreenHeader title={routeName} subtitle="Phone required before payment" onBack={onBack} />
+      <ScreenHeader title={routeName} subtitle={t('phoneRequiredBeforePayment')} onBack={onBack} />
       <StatusCard
         icon={<Phone size={21} />}
-        title="Share phone first"
-        body="Your phone number is required before you create or join a pool."
+        title={t('phoneRequiredTitle')}
+        body={t('phoneRequiredBody')}
       />
       <ContactCard
         phoneNumber={phoneNumber}
@@ -480,7 +593,7 @@ function PhoneRequiredScreen({
         busy={busy}
       />
       <button className="side-outline-button" type="button" onClick={onBack}>
-        Back to Routes
+        {t('backToRoutes')}
       </button>
     </>
   );
@@ -493,20 +606,22 @@ function TelegramWorkflowLockedScreen({
   activePool: PassengerPoolView;
   onRefresh: () => void;
 }) {
+  const { language, t } = useLanguageCopy();
+
   return (
     <>
-      <ScreenHeader title="Continue in Telegram" subtitle={activePool.pool.routeName} onRefresh={onRefresh} />
+      <ScreenHeader title="Telegram" subtitle={activePool.pool.routeName} onRefresh={onRefresh} />
       <StatusCard
         icon={<MessageCircle size={21} />}
-        title="This ride is managed in Telegram"
-        body="Use the Telegram bot buttons for payment, cancellation, early dispatch, and arrival until this ride is finished or cancelled."
+        title={t('miniAppLockedTitle')}
+        body={t('miniAppLockedBody')}
       />
       <section className="side-pool-summary">
         <div>
           <span>{activePool.pool.routeName}</span>
-          <strong>{activePool.passenger.paymentStatus === 'confirmed' ? 'Seat confirmed' : 'Payment pending'}</strong>
+          <strong>{activePool.passenger.paymentStatus === 'confirmed' ? t('seatConfirmed') : t('payment')}</strong>
         </div>
-        <strong>{formatPrice(activePool.pool)}</strong>
+        <strong>{formatPrice(activePool.pool, language)}</strong>
       </section>
     </>
   );
@@ -525,29 +640,31 @@ function AvailablePoolCard({
   busy: BusyAction;
   onJoin: () => void;
 }) {
+  const { language, t } = useLanguageCopy();
+
   return (
     <article className="side-active-pool-card">
       <div className="side-active-pool-head">
         <div>
-          <h2>Pool {String.fromCharCode(65 + index)}</h2>
-          <span>{formatPoolSeatLabel(pool)}</span>
+          <h2>{t('poolLabel', { label: String.fromCharCode(65 + index) })}</h2>
+          <span>{formatPoolSeatLabel(pool, language)}</span>
         </div>
-        <strong>{formatPrice(pool)}</strong>
+        <strong>{formatPrice(pool, language)}</strong>
       </div>
       <div className="side-captain-row">
         <Avatar label={formatPassengerName(pool.captain)} />
         <span>
-          Captain {formatPassengerName(pool.captain)}
+          {t('captainName', { name: formatPassengerName(pool.captain) })}
           <small>@{pool.captain?.username ?? 'telegram'}</small>
         </span>
       </div>
       <PoolProgress passengerCount={pool.passengerCount} poolSize={poolSize} />
       <div className="side-card-meta">
-        <span>{poolOccupancyLabel(pool, poolSize)}</span>
-        <span>ETA 5-10 min</span>
+        <span>{poolOccupancyLabel(pool, poolSize, language)}</span>
+        <span>ETA {t('eta')}</span>
       </div>
       <button className="side-main-button" type="button" onClick={onJoin} disabled={busy === 'join'}>
-        Join this pool
+        {t('joinThisPool')}
       </button>
     </article>
   );
@@ -586,21 +703,22 @@ function PoolDashboard({
   const isPendingPayment = passenger.paymentStatus === 'pending';
   const isAssigned =
     pool.status === 'assigned' || pool.status === 'arrival_requested' || pool.status === 'in_progress';
+  const { language, t } = useLanguageCopy();
 
   return (
     <>
       <ScreenHeader
-        title={isPendingPayment ? 'Pool Preview' : isAssigned ? 'Driver & Arrival' : 'Waiting in Pool'}
-        subtitle={`${pool.routeName} - Est. 5-10 min`}
+        title={isPendingPayment ? t('poolPreview') : isAssigned ? t('driverAssigned') : t('waitingInPool')}
+        subtitle={`${pool.routeName} - Est. ${t('eta')}`}
         onRefresh={onRefresh}
       />
 
       <section className="side-pool-summary">
         <div>
           <span>{pool.routeName}</span>
-          <strong>{pool.isEarlyDispatch ? 'Early Pool' : `Pool ${pool.id}`}</strong>
+          <strong>{pool.isEarlyDispatch ? t('earlyPool') : t('poolTitle', { id: pool.id })}</strong>
         </div>
-        <strong>{formatPrice(pool)}</strong>
+        <strong>{formatPrice(pool, language)}</strong>
       </section>
 
       {isPendingPayment ? (
@@ -646,45 +764,46 @@ function CompletedTripScreen({
   onRefresh: () => void;
 }) {
   const { pool, driver } = completedPool;
+  const { language, t } = useLanguageCopy();
 
   return (
     <>
-      <ScreenHeader title="Trip Complete" subtitle="Thanks for riding with Side" onRefresh={onRefresh} />
+      <ScreenHeader title={t('tripComplete')} subtitle={t('tripCompleteThanks')} onRefresh={onRefresh} />
       <section className="side-complete-card">
         <span className="side-complete-check">
           <Check size={48} />
         </span>
-        <h1>Ride completed!</h1>
-        <p>Congrats, your ride is complete.</p>
+        <h1>{t('tripDoneTitle')}</h1>
+        <p>{t('tripDoneBody')}</p>
       </section>
       <section className="side-section side-complete-summary">
         <div>
-          <span>Route</span>
+          <span>{t('route')}</span>
           <strong>{pool.routeName}</strong>
         </div>
         <div>
-          <span>Total Paid</span>
-          <strong>{formatPrice(pool)}</strong>
+          <span>{t('totalPaid')}</span>
+          <strong>{formatPrice(pool, language)}</strong>
         </div>
         <div>
-          <span>Passengers</span>
+          <span>{t('passengers')}</span>
           <strong>{pool.passengerCount}</strong>
         </div>
         <div>
-          <span>Status</span>
-          <strong>Completed</strong>
+          <span>{t('status')}</span>
+          <strong>{t('completed')}</strong>
         </div>
       </section>
       {driver ? <DriverCard driver={driver} /> : null}
       <section className="side-status-card side-complete-note">
         <CheckCircle2 size={21} />
         <div>
-          <h2>You saved by pooling.</h2>
-          <p>Share rides, save money, ride together.</p>
+          <h2>{t('savedByPooling')}</h2>
+          <p>{t('shareRides')}</p>
         </div>
       </section>
       <button className="side-main-button" type="button" onClick={onBackToRoutes}>
-        Back to Routes
+        {t('backToRoutes')}
       </button>
     </>
   );
@@ -712,12 +831,13 @@ function PaymentPreview({
   onCancel: () => void;
 }) {
   const { pool } = activePool;
+  const { language, t } = useLanguageCopy();
   return (
     <>
       <section className="side-section">
         <div className="side-section-title">
-          <h2>Pool Progress</h2>
-          <span>{poolOccupancyLabel(pool, poolSize)}</span>
+          <h2>{t('poolProgress')}</h2>
+          <span>{poolOccupancyLabel(pool, poolSize, language)}</span>
         </div>
         <PoolProgress passengerCount={pool.passengerCount} poolSize={poolSize} />
       </section>
@@ -730,9 +850,13 @@ function PaymentPreview({
       />
 
       <section className="side-section side-payment-copy">
-        <h2>Payment</h2>
-        <p>Pay {formatPrice(pool)} to reserve your seat.</p>
-        <p>You will see the PIN after payment. If you started this pool, payment publishes it for others.</p>
+        <h2>{t('payment')}</h2>
+        <p>{t('payToReserve', { price: formatPrice(pool, language) })}</p>
+        <p>
+          {language === 'am'
+            ? 'PIN ከክፍያ በኋላ ይታያል። ይህን ፑል እርስዎ ከጀመሩት፣ ክፍያው ለሌሎች እንዲታይ ያደርገዋል።'
+            : 'You will see the PIN after payment. If you started this pool, payment publishes it for others.'}
+        </p>
       </section>
 
       <div className="side-action-stack">
@@ -742,10 +866,10 @@ function PaymentPreview({
           onClick={onConfirmPayment}
           disabled={busy === 'pay' || !hasSavedPhone}
         >
-          {hasSavedPhone ? 'I Have Paid' : 'Save Phone First'} <Check size={18} />
+          {hasSavedPhone ? t('havePaid') : t('savePhoneFirst')} <Check size={18} />
         </button>
         <button className="side-outline-button" type="button" onClick={onCancel} disabled={busy === 'cancel'}>
-          Cancel
+          {t('cancel')}
         </button>
       </div>
     </>
@@ -766,13 +890,14 @@ function WaitingPoolView({
   onEarlyDispatch: () => void;
 }) {
   const { pool, actions } = activePool;
+  const { language, t } = useLanguageCopy();
   return (
     <>
-      <StatusCard icon={<CheckCircle2 size={21} />} title="Payment Confirmed" body="Your seat is reserved." />
+      <StatusCard icon={<CheckCircle2 size={21} />} title={t('paymentConfirmed')} body={t('yourSeatReserved')} />
       <section className="side-section">
         <div className="side-section-title">
-          <h2>Pool Progress</h2>
-          <span>{poolOccupancyLabel(pool, poolSize)}</span>
+          <h2>{t('poolProgress')}</h2>
+          <span>{poolOccupancyLabel(pool, poolSize, language)}</span>
         </div>
         <PoolProgress
           passengerCount={pool.passengerCount}
@@ -785,26 +910,32 @@ function WaitingPoolView({
       <PinCard pin={pool.pinCode} />
       <section className="side-section">
         <div className="side-section-title">
-          <h2>Passengers in this pool</h2>
-          <span>{pool.passengerCount} confirmed</span>
+          <h2>{t('passengersInPool')}</h2>
+          <span>{t('confirmedCount', { count: pool.passengerCount })}</span>
         </div>
         <PassengerChips count={pool.passengerCount} poolSize={poolSize} passengers={activePool.passengers} />
       </section>
       {actions.canRequestEarlyDispatch ? (
         <div className="side-action-stack">
           <button className="side-main-button" type="button" onClick={onEarlyDispatch} disabled={busy === 'early'}>
-            <Zap size={18} /> Let's Go Now
+            <Zap size={18} /> {language === 'am' ? 'አሁን እንሂድ' : "Let's Go Now"}
           </button>
         </div>
       ) : null}
       {actions.canCancel ? (
         <div className="side-action-stack">
           <button className="side-outline-button" type="button" onClick={onCancel} disabled={busy === 'cancel'}>
-            Cancel Pool
+            {t('cancelPool')}
           </button>
         </div>
       ) : null}
-      <Timeline items={['Payment confirmed', `${pool.passengerCount} of ${poolSize} seats filled`, 'Driver will be assigned']} />
+      <Timeline
+        items={[
+          t('timelinePaymentConfirmed'),
+          poolOccupancyLabel(pool, poolSize, language),
+          t('timelineDriverWillBeAssigned')
+        ]}
+      />
     </>
   );
 }
@@ -823,19 +954,26 @@ function DriverArrivalView({
   onRejectArrival: () => void;
 }) {
   const { pool, driver, actions } = activePool;
+  const { language, t } = useLanguageCopy();
   return (
     <>
       <StatusCard
         icon={<ShieldCheck size={21} />}
-        title={pool.arrivalRequestedAt ? 'Driver says they have arrived.' : 'Driver Assigned'}
-        body={pool.arrivalRequestedAt ? 'Please confirm to start the trip.' : 'Driver is on the way.'}
+        title={pool.arrivalRequestedAt ? t('driverArrivedTitle') : t('driverAssigned')}
+        body={
+          pool.arrivalRequestedAt
+            ? language === 'am'
+              ? 'ጉዞውን ለመጀመር እባክዎ ያረጋግጡ።'
+              : 'Please confirm to start the trip.'
+            : t('driverOnWay')
+        }
       />
       {driver ? <DriverCard driver={driver} /> : null}
       <PinCard pin={pool.pinCode} />
       <section className="side-section">
         <div className="side-section-title">
-          <h2>Pool Progress</h2>
-          <span>{poolOccupancyLabel(pool, poolSize)}</span>
+          <h2>{t('poolProgress')}</h2>
+          <span>{poolOccupancyLabel(pool, poolSize, language)}</span>
         </div>
         <PoolProgress
           passengerCount={pool.passengerCount}
@@ -845,7 +983,14 @@ function DriverArrivalView({
           captainTelegramId={pool.captainTelegramId}
         />
       </section>
-      <Timeline items={['Payment confirmed', `${pool.passengerCount} seats filled`, 'Driver assigned', pool.arrivalRequestedAt ? 'Driver arrived' : 'Driver on the way']} />
+      <Timeline
+        items={[
+          t('timelinePaymentConfirmed'),
+          poolOccupancyLabel(pool, poolSize, language),
+          t('timelineDriverAssigned'),
+          pool.arrivalRequestedAt ? t('timelineDriverArrived') : t('driverOnWayStep')
+        ]}
+      />
       {actions.canConfirmArrival ? (
         <div className="side-action-stack">
           <button
@@ -854,7 +999,7 @@ function DriverArrivalView({
             onClick={onConfirmArrival}
             disabled={busy === 'confirm_arrival'}
           >
-            Confirm Arrival <Check size={18} />
+            {t('confirmArrival')} <Check size={18} />
           </button>
           <button
             className="side-outline-button"
@@ -862,7 +1007,7 @@ function DriverArrivalView({
             onClick={onRejectArrival}
             disabled={busy === 'reject_arrival'}
           >
-            Driver Not Here
+            {t('driverNotHere')}
           </button>
         </div>
       ) : null}
@@ -881,12 +1026,14 @@ function ContactCard({
   onSubmitPhone: (event: FormEvent<HTMLFormElement>) => void;
   busy?: BusyAction;
 }) {
+  const { t } = useLanguageCopy();
+
   return (
     <section className="side-section side-contact-card">
       <UsersRound size={22} />
       <div>
-        <h2>Your phone & Telegram profile</h2>
-        <p>Required before payment and shared only with the pool and driver.</p>
+        <h2>{t('contactTitle')}</h2>
+        <p>{t('contactBody')}</p>
       </div>
       <form onSubmit={onSubmitPhone}>
         <input
@@ -895,9 +1042,9 @@ function ContactCard({
           onChange={(event) => onPhoneChange(event.target.value)}
           placeholder="+251..."
           autoComplete="tel"
-          aria-label="Phone"
+          aria-label={t('phone')}
         />
-        <button className="side-icon-button" type="submit" aria-label="Save phone" disabled={busy === 'phone'}>
+        <button className="side-icon-button" type="submit" aria-label={t('savePhone')} disabled={busy === 'phone'}>
           <Phone size={16} />
         </button>
       </form>
@@ -906,18 +1053,20 @@ function ContactCard({
 }
 
 function DriverCard({ driver }: { driver: NonNullable<PassengerPoolView['driver']> }) {
+  const { t } = useLanguageCopy();
+
   return (
     <section className="side-section side-driver-card">
       <Avatar label={formatPassengerName(driver)} />
       <div>
         <h2>{formatPassengerName(driver)}</h2>
-        <p>{driver.username ? `@${driver.username}` : 'Telegram driver'}</p>
+        <p>{driver.username ? `@${driver.username}` : t('driverTelegramFallback')}</p>
         {driver.phoneNumber ? <p>{driver.phoneNumber}</p> : null}
       </div>
-      <button className="side-icon-button" type="button" aria-label="Call driver">
+      <button className="side-icon-button" type="button" aria-label={t('callDriver')}>
         <Phone size={16} />
       </button>
-      <button className="side-icon-button" type="button" aria-label="Message driver">
+      <button className="side-icon-button" type="button" aria-label={t('messageDriver')}>
         <MessageCircle size={16} />
       </button>
     </section>
@@ -926,6 +1075,7 @@ function DriverCard({ driver }: { driver: NonNullable<PassengerPoolView['driver'
 
 function PinCard({ pin }: { pin: string | null }) {
   const [copied, setCopied] = useState(false);
+  const { t } = useLanguageCopy();
 
   async function copyPin() {
     if (!pin) {
@@ -945,11 +1095,11 @@ function PinCard({ pin }: { pin: string | null }) {
 
   return (
     <section className="side-section side-pin-card">
-      <span>Pool PIN</span>
-      <strong>{pin ?? 'After payment'}</strong>
-      <p>{copied ? 'PIN copied.' : 'Share this PIN with your driver.'}</p>
+      <span>{t('poolPin')}</span>
+      <strong>{pin ?? t('afterPayment')}</strong>
+      <p>{copied ? t('pinCopied') : t('sharePin')}</p>
       {pin ? (
-        <button className="side-copy-button" type="button" onClick={copyPin} aria-label="Copy pool PIN">
+        <button className="side-copy-button" type="button" onClick={copyPin} aria-label={t('copyPoolPin')}>
           {copied ? <Check size={18} /> : <Copy size={18} />}
         </button>
       ) : null}
@@ -985,6 +1135,7 @@ function PoolProgress({
   const [selectedSeatIndex, setSelectedSeatIndex] = useState<number | null>(null);
   const selectedPassenger =
     selectedSeatIndex === null ? null : passengers[selectedSeatIndex] ?? null;
+  const { language, t } = useLanguageCopy();
 
   useEffect(() => {
     if (selectedSeatIndex !== null && !passengers[selectedSeatIndex]) {
@@ -994,7 +1145,7 @@ function PoolProgress({
 
   return (
     <>
-      <div className="side-progress-dots" aria-label={`${passengerCount} of ${poolSize} seats filled`}>
+      <div className="side-progress-dots" aria-label={poolOccupancyLabel({ passengerCount }, poolSize, language)}>
         {Array.from({ length: poolSize }, (_, index) => {
           const passenger = passengers[index] ?? null;
           const isFilled = index < passengerCount;
@@ -1007,7 +1158,9 @@ function PoolProgress({
               key={index}
               type="button"
               onClick={() => setSelectedSeatIndex(isSelected ? null : index)}
-              aria-label={`View ${passenger.displayName || 'passenger'} contact`}
+              aria-label={t('viewPassengerContact', {
+                name: passenger.displayName || t('passengerFallback')
+              })}
             >
               <UserRound size={16} />
             </button>
@@ -1025,7 +1178,7 @@ function PoolProgress({
           isCurrentPassenger={selectedPassenger.telegramId === currentTelegramId}
         />
       ) : passengers.length ? (
-        <p className="side-seat-hint">Tap a filled seat to view passenger name and phone.</p>
+        <p className="side-seat-hint">{t('seatHint')}</p>
       ) : null}
     </>
   );
@@ -1040,17 +1193,19 @@ function PassengerSeatDetail({
   isCaptain: boolean;
   isCurrentPassenger: boolean;
 }) {
+  const { t } = useLanguageCopy();
+
   return (
     <article className="side-seat-detail">
       <Avatar label={passenger.displayName || passenger.username || passenger.telegramId} />
       <div>
         <h3>
           {passenger.displayName || `Telegram ${passenger.telegramId}`}
-          {isCurrentPassenger ? <span>You</span> : null}
-          {isCaptain ? <span>Captain</span> : null}
+          {isCurrentPassenger ? <span>{t('you')}</span> : null}
+          {isCaptain ? <span>{t('captain')}</span> : null}
         </h3>
         {passenger.username ? <p>@{passenger.username}</p> : null}
-        <p>{passenger.phoneNumber ?? 'Phone not shared'}</p>
+        <p>{passenger.phoneNumber ?? t('phoneNotShared')}</p>
       </div>
     </article>
   );
@@ -1065,13 +1220,15 @@ function PassengerChips({
   poolSize: number;
   passengers?: PoolPassengerContact[];
 }) {
+  const { t } = useLanguageCopy();
+
   return (
     <div className="side-passenger-chips">
       {Array.from({ length: poolSize }, (_, index) => {
         const passenger = passengers[index];
         return (
           <span className={index < count ? 'filled' : undefined} key={index}>
-            {passenger ? passengerInitials(passenger) : index < count ? `P${index + 1}` : 'Open'}
+            {passenger ? passengerInitials(passenger) : index < count ? `P${index + 1}` : t('open')}
           </span>
         );
       })}
@@ -1113,6 +1270,8 @@ function SideHeader({
   subtitle: string;
   onRefresh: () => void;
 }) {
+  const { t } = useLanguageCopy();
+
   return (
     <header className="side-header">
       <div>
@@ -1122,7 +1281,7 @@ function SideHeader({
           <small>{subtitle}</small>
         </span>
       </div>
-      <button className="side-icon-button" type="button" aria-label="Refresh" onClick={onRefresh}>
+      <button className="side-icon-button" type="button" aria-label={t('refresh')} onClick={onRefresh}>
         <RefreshCw size={17} />
       </button>
       <button className="side-icon-button" type="button" aria-label="Menu">
@@ -1143,10 +1302,12 @@ function ScreenHeader({
   onBack?: () => void;
   onRefresh?: () => void;
 }) {
+  const { t } = useLanguageCopy();
+
   return (
     <header className="side-screen-header">
       {onBack ? (
-        <button className="side-icon-button subtle" type="button" aria-label="Back" onClick={onBack}>
+        <button className="side-icon-button subtle" type="button" aria-label={t('back')} onClick={onBack}>
           <ArrowLeft size={18} />
         </button>
       ) : (
@@ -1156,7 +1317,7 @@ function ScreenHeader({
         <h1>{title}</h1>
         <p>{subtitle}</p>
       </div>
-      <button className="side-icon-button subtle" type="button" aria-label="Refresh" onClick={onRefresh}>
+      <button className="side-icon-button subtle" type="button" aria-label={t('refresh')} onClick={onRefresh}>
         {onRefresh ? <RefreshCw size={17} /> : <MoreHorizontal size={17} />}
       </button>
     </header>
@@ -1164,19 +1325,21 @@ function ScreenHeader({
 }
 
 function BottomNav({ active }: { active: 'routes' | 'pool' }) {
+  const { t } = useLanguageCopy();
+
   return (
     <nav className="side-bottom-nav">
       <span className={active === 'routes' ? 'active' : undefined}>
-        <Home size={17} /> Routes
+        <Home size={17} /> {t('routes')}
       </span>
       <span className={active === 'pool' ? 'active' : undefined}>
-        <UsersRound size={17} /> My Pool
+        <UsersRound size={17} /> {t('myPool')}
       </span>
       <span>
-        <WalletCards size={17} /> Payments
+        <WalletCards size={17} /> {t('payments')}
       </span>
       <span>
-        <UserRound size={17} /> Profile
+        <UserRound size={17} /> {t('profile')}
       </span>
     </nav>
   );
@@ -1213,22 +1376,29 @@ function InlineAlert({ message }: { message: string }) {
 }
 
 function LoadingState() {
+  const { t } = useLanguageCopy();
+
   return (
     <section className="panel loading-panel side-loading-panel">
       <RefreshCw size={20} />
-      <span>Loading ride status</span>
+      <span>{t('loadingRideStatus')}</span>
     </section>
   );
 }
 
 function AuthRequired() {
+  const { t } = useLanguageCopy();
+
   return (
     <main className="app-shell side-auth-shell">
+      <div className="side-language-row">
+        <LanguageToggle />
+      </div>
       <section className="side-section">
         <div className="section-header">
           <div>
-            <p className="section-label">Telegram Required</p>
-            <h1>Open from Telegram</h1>
+            <p className="section-label">{t('telegramRequired')}</p>
+            <h1>{t('authRequiredTitle')}</h1>
           </div>
           <ShieldCheck size={24} />
         </div>

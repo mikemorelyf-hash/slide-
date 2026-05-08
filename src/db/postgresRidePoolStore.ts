@@ -5,6 +5,7 @@ import type {
   AdminPoolDetail,
   AdminPoolSummary
 } from '../domain/adminTypes.js';
+import { normalizeLanguageCode } from '../domain/language.js';
 import type { CreatePoolInput, RidePoolStore } from '../domain/ridePoolService.js';
 import type {
   NotificationOutboxInput,
@@ -462,12 +463,14 @@ export class PostgresRidePoolStore implements RidePoolStore {
           captain.last_name AS captain_user_last_name,
           captain.username AS captain_user_username,
           captain.phone_number AS captain_user_phone_number,
+          captain.language_code AS captain_user_language_code,
           captain.role AS captain_user_role,
           driver.telegram_id AS driver_user_telegram_id,
           driver.first_name AS driver_user_first_name,
           driver.last_name AS driver_user_last_name,
           driver.username AS driver_user_username,
           driver.phone_number AS driver_user_phone_number,
+          driver.language_code AS driver_user_language_code,
           driver.role AS driver_user_role
         FROM pools p
         JOIN routes r ON r.id = p.route_id
@@ -626,6 +629,7 @@ export class PostgresRidePoolStore implements RidePoolStore {
           captain.last_name AS captain_user_last_name,
           captain.username AS captain_user_username,
           captain.phone_number AS captain_user_phone_number,
+          captain.language_code AS captain_user_language_code,
           captain.role AS captain_user_role
         FROM pools p
         JOIN routes r ON r.id = p.route_id
@@ -1445,6 +1449,17 @@ export class PostgresRidePoolStore implements RidePoolStore {
     );
   }
 
+  async updateUserLanguage(telegramId: string, languageCode: TelegramUserProfile['languageCode']): Promise<void> {
+    await this.queryable.query(
+      `
+        UPDATE telegram_users
+        SET language_code = $2, updated_at = NOW()
+        WHERE telegram_id = $1
+      `,
+      [telegramId, normalizeLanguageCode(languageCode)]
+    );
+  }
+
   async markDriverBotStarted(telegramId: string): Promise<void> {
     await this.queryable.query(
       `
@@ -1507,7 +1522,7 @@ export class PostgresRidePoolStore implements RidePoolStore {
   async getUserProfile(telegramId: string): Promise<TelegramUserProfile | null> {
     const result = await this.queryable.query(
       `
-        SELECT telegram_id, first_name, last_name, username, phone_number,
+        SELECT telegram_id, first_name, last_name, username, phone_number, language_code,
                location_lat, location_lng, location_label, role, driver_bot_started_at
         FROM telegram_users
         WHERE telegram_id = $1
@@ -1525,6 +1540,7 @@ export class PostgresRidePoolStore implements RidePoolStore {
       firstName: row.first_name,
       lastName: row.last_name,
       username: row.username,
+      languageCode: normalizeLanguageCode(row.language_code),
       phoneNumber: row.phone_number,
       locationLat: row.location_lat,
       locationLng: row.location_lng,
@@ -1644,6 +1660,7 @@ function mapPrefixedUser(row: Record<string, unknown>, prefix: string): Telegram
     firstName: row[`${prefix}_first_name`] ? String(row[`${prefix}_first_name`]) : null,
     lastName: row[`${prefix}_last_name`] ? String(row[`${prefix}_last_name`]) : null,
     username: row[`${prefix}_username`] ? String(row[`${prefix}_username`]) : null,
+    languageCode: normalizeLanguageCode(row[`${prefix}_language_code`]),
     phoneNumber: row[`${prefix}_phone_number`] ? String(row[`${prefix}_phone_number`]) : null,
     role: row[`${prefix}_role`] as TelegramUserProfile['role']
   };

@@ -21,6 +21,8 @@ export async function runMigrations(db: PgPool): Promise<void> {
       location_lat DOUBLE PRECISION,
       location_lng DOUBLE PRECISION,
       location_label TEXT,
+      language_code TEXT NOT NULL DEFAULT 'en'
+        CHECK (language_code IN ('en', 'am')),
       driver_bot_started_at TIMESTAMPTZ,
       role TEXT NOT NULL DEFAULT 'passenger'
         CHECK (role IN ('passenger', 'driver', 'admin')),
@@ -159,7 +161,13 @@ export async function runMigrations(db: PgPool): Promise<void> {
       ADD COLUMN IF NOT EXISTS reservation_expires_at TIMESTAMPTZ;
 
     ALTER TABLE telegram_users
-      ADD COLUMN IF NOT EXISTS driver_bot_started_at TIMESTAMPTZ;
+      ADD COLUMN IF NOT EXISTS driver_bot_started_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS language_code TEXT NOT NULL DEFAULT 'en';
+
+    ALTER TABLE telegram_users
+      DROP CONSTRAINT IF EXISTS telegram_users_language_code_check,
+      ADD CONSTRAINT telegram_users_language_code_check
+        CHECK (language_code IN ('en', 'am'));
 
     ALTER TABLE notification_outbox
       ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();

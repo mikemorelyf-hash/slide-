@@ -2,7 +2,7 @@ import { Markup } from 'telegraf';
 
 import type { AppConfig } from '../config/env.js';
 import type { NotificationOutboxInput, PoolEventInput, RidePool } from '../domain/types.js';
-import { driverGroupAlertMessage } from '../bot/messages.js';
+import { botLabel, driverGroupAlertMessage } from '../bot/messages.js';
 
 interface RepostStore {
   getPool(poolId: string): Promise<RidePool | null>;
@@ -51,7 +51,7 @@ export async function repostReadyPoolDriverAlert({
       poolId: pool.id,
       text: driverGroupAlertMessage(pool),
       replyMarkup: Markup.inlineKeyboard([
-        [Markup.button.callback('Accept Job', `accept:${pool.id}`)]
+        [Markup.button.callback(botLabel('acceptJob'), `accept:${pool.id}`)]
       ]).reply_markup
     }
   });

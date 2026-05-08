@@ -3,7 +3,7 @@ import { Markup } from 'telegraf';
 import type { AppConfig } from '../config/env.js';
 import type { PostgresRidePoolStore } from '../db/postgresRidePoolStore.js';
 import type { NotificationOutboxInput, PoolEventInput, RidePool } from '../domain/types.js';
-import { driverGroupAlertMessage, repostedDriverAlertMessage } from '../bot/messages.js';
+import { botLabel, driverGroupAlertMessage, repostedDriverAlertMessage } from '../bot/messages.js';
 
 interface RecoveryStore {
   listReadyPoolsMissingDriverAlert(limit?: number): Promise<RidePool[]>;
@@ -108,7 +108,7 @@ function driverAlertPayload(pool: RidePool, text: string): Record<string, unknow
     poolId: pool.id,
     text,
     replyMarkup: Markup.inlineKeyboard([
-      [Markup.button.callback('Accept Job', `accept:${pool.id}`)]
+      [Markup.button.callback(botLabel('acceptJob'), `accept:${pool.id}`)]
     ]).reply_markup
   };
 }

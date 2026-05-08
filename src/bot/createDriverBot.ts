@@ -3,16 +3,21 @@ import { Markup, Telegraf, type Context } from 'telegraf';
 import type { AppConfig } from '../config/env.js';
 import { PostgresRidePoolStore } from '../db/postgresRidePoolStore.js';
 import { createRequestHash, runIdempotent } from '../domain/idempotency.js';
+import { isSupportedLanguageCode, type SupportedLanguageCode } from '../domain/language.js';
 import { RidePoolService } from '../domain/ridePoolService.js';
 import type { RidePool, TelegramUserProfile } from '../domain/types.js';
 import type { BotRegistry } from './botRegistry.js';
 import { ensureDriverBotStarted, ensurePrivateDriverChat } from './driverAccess.js';
 import { parseDriverPinMessage } from './driverPinMessage.js';
+import { getLanguageTargets, getUserLanguage, profileLanguage } from './language.js';
 import {
+  botLabel,
   driverAssignedGroupMessage,
   driverArrivalRequestCaptainMessage,
   driverArrivalRequestSentMessage,
   driverManifestMessage,
+  languageMenuMessage,
+  languageUpdatedMessage,
   passengerDriverAssignedMessage,
   tripCompletedDriverMessage,
   tripCompletedPassengerMessage
@@ -34,17 +39,31 @@ export function createDriverBot({ config, store, service, bots }: DriverBotDeps)
 
   bot.start(async (ctx) => {
     const profile = await upsertUserFromContext(ctx, store, 'driver');
-    if (!(await ensurePrivateDriverChat(ctx))) {
+    const language = profileLanguage(profile);
+    if (!(await ensurePrivateDriverChat(ctx, language))) {
       return;
     }
     await store.markDriverBotStarted(profile.telegramId);
-    await ctx.reply(
-      [
-        'Driver bot ready.',
-        'You can accept jobs from the driver group.',
-        'After a trip, send the 4-digit PIN here.'
-      ].join('\n')
-    );
+    await ctx.reply(botLabel('driverBotReady', language));
+  });
+
+  bot.command('language', async (ctx) => {
+    const profile = await upsertUserFromContext(ctx, store, 'driver');
+    const language = profileLanguage(profile);
+    await ctx.reply(languageMenuMessage(language), languageKeyboard(language));
+  });
+
+  bot.action(/^language:(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const telegramId = requireTelegramUserId(ctx);
+    if (!telegramId) {
+      return;
+    }
+
+    const nextLanguage = isSupportedLanguageCode(ctx.match[1]) ? ctx.match[1] : 'en';
+    await upsertUserFromContext(ctx, store, 'driver');
+    await store.updateUserLanguage(telegramId, nextLanguage);
+    await editOrReply(ctx, languageUpdatedMessage(nextLanguage), languageKeyboard(nextLanguage));
   });
 
   bot.command('complete', async (ctx) => {
@@ -53,7 +72,8 @@ export function createDriverBot({ config, store, service, bots }: DriverBotDeps)
       return;
     }
 
-    if (!(await ensurePrivateDriverChat(ctx))) {
+    const language = await getUserLanguage(store, telegramId);
+    if (!(await ensurePrivateDriverChat(ctx, language))) {
       return;
     }
 
@@ -61,11 +81,11 @@ export function createDriverBot({ config, store, service, bots }: DriverBotDeps)
     await store.markDriverBotStarted(telegramId);
     const pinCode = readCommandArgument(ctx);
     if (!pinCode) {
-      await ctx.reply('Usage: /complete 4334');
+      await ctx.reply(botLabel('usageComplete', language));
       return;
     }
 
-    await completeTripFromPin(ctx, config, store, service, bots.passengerBot ?? bot, pinCode);
+    await completeTripFromPin(ctx, config, store, service, bots.passengerBot ?? bot, pinCode, language);
   });
 
   bot.hears(/^\s*\d{4}\s*$/, async (ctx) => {
@@ -78,23 +98,25 @@ export function createDriverBot({ config, store, service, bots }: DriverBotDeps)
     if (!telegramId) {
       return;
     }
-    if (!(await ensurePrivateDriverChat(ctx))) {
+    const language = await getUserLanguage(store, telegramId);
+    if (!(await ensurePrivateDriverChat(ctx, language))) {
       return;
     }
     await upsertUserFromContext(ctx, store, 'driver');
     await store.markDriverBotStarted(telegramId);
-    await completeTripFromPin(ctx, config, store, service, bots.passengerBot ?? bot, pinCode);
+    await completeTripFromPin(ctx, config, store, service, bots.passengerBot ?? bot, pinCode, language);
   });
 
   bot.action(/^accept:(.+)$/, async (ctx) => {
     await runTelegramAction(ctx, store, `accept:${ctx.match[1]}`, async () => {
       const telegramId = requireTelegramUserId(ctx);
       if (!telegramId) {
-        await ctx.answerCbQuery('Open the driver bot first, then try again.');
+        await ctx.answerCbQuery(botLabel('openDriverBotFirst'));
         return;
       }
 
-      if (!(await ensureDriverBotStarted(ctx, store, telegramId))) {
+      const language = await getUserLanguage(store, telegramId);
+      if (!(await ensureDriverBotStarted(ctx, store, telegramId, language))) {
         return;
       }
 
@@ -102,11 +124,11 @@ export function createDriverBot({ config, store, service, bots }: DriverBotDeps)
       const result = await service.acceptJob(ctx.match[1], telegramId);
 
       if (result.kind === 'already_taken') {
-        await ctx.answerCbQuery('Sorry, this job has already been taken.', { show_alert: true });
+        await ctx.answerCbQuery(botLabel('jobTaken', language), { show_alert: true });
         return;
       }
 
-      await ctx.answerCbQuery('You accepted the job.');
+      await ctx.answerCbQuery(botLabel('jobAccepted', language));
       const driverLabel = driverProfile.username
         ? `@${driverProfile.username}`
         : driverProfile.firstName ?? `Telegram ${driverProfile.telegramId}`;
@@ -119,12 +141,12 @@ export function createDriverBot({ config, store, service, bots }: DriverBotDeps)
 
       await store.enqueueNotification({
         targetBot: 'driver',
-        chatId: telegramId,
-        messageType: 'driver_manifest',
-        payload: {
-          text: driverManifestMessage(result.pool, result.manifest),
+          chatId: telegramId,
+          messageType: 'driver_manifest',
+          payload: {
+          text: driverManifestMessage(result.pool, result.manifest, language),
           replyMarkup: Markup.inlineKeyboard([
-            [Markup.button.callback('I Arrived', `arrived:${result.pool.id}`)]
+            [Markup.button.callback(botLabel('iArrived', language), `arrived:${result.pool.id}`)]
           ]).reply_markup
         }
       });
@@ -137,33 +159,35 @@ export function createDriverBot({ config, store, service, bots }: DriverBotDeps)
     await runTelegramAction(ctx, store, `arrived:${ctx.match[1]}`, async () => {
       const telegramId = requireTelegramUserId(ctx);
       if (!telegramId) {
-        await ctx.answerCbQuery('Open the driver bot first, then try again.');
+        await ctx.answerCbQuery(botLabel('openDriverBotFirst'));
         return;
       }
 
+      const language = await getUserLanguage(store, telegramId);
       const driverProfile = await upsertUserFromContext(ctx, store, 'driver');
       const result = await service.requestDriverArrival(ctx.match[1], telegramId);
       if (result.kind === 'not_allowed') {
-        await ctx.answerCbQuery('Arrival request is not available for this job.', {
+        await ctx.answerCbQuery(botLabel('arrivalNotAvailable', language), {
           show_alert: true
         });
         return;
       }
 
-      await ctx.answerCbQuery('Arrival request sent.');
-      await ctx.reply(driverArrivalRequestSentMessage(result.pool));
+      await ctx.answerCbQuery(botLabel('arrivalRequestSentCallback', language));
+      await ctx.reply(driverArrivalRequestSentMessage(result.pool, language));
 
       const passengerIds = [result.captainTelegramId, ...result.passengerIdsToNotify];
+      const passengerTargets = await getLanguageTargets(store, passengerIds);
       await store.enqueueNotifications(
-        passengerIds.map((passengerId) => ({
+        passengerTargets.map(({ telegramId: passengerId, language: passengerLanguage }) => ({
           targetBot: 'passenger' as const,
           chatId: passengerId,
           messageType: 'driver_arrival_requested',
           payload: {
-            text: driverArrivalRequestCaptainMessage(result.pool, driverProfile),
+            text: driverArrivalRequestCaptainMessage(result.pool, driverProfile, passengerLanguage),
             replyMarkup: Markup.inlineKeyboard([
-              [Markup.button.callback('Confirm Arrival', `confirm_arrival:${result.pool.id}`)],
-              [Markup.button.callback('Driver Not Here', `reject_arrival:${result.pool.id}`)]
+              [Markup.button.callback(botLabel('confirmArrival', passengerLanguage), `confirm_arrival:${result.pool.id}`)],
+              [Markup.button.callback(botLabel('driverNotHere', passengerLanguage), `reject_arrival:${result.pool.id}`)]
             ]).reply_markup
           }
         }))
@@ -174,7 +198,8 @@ export function createDriverBot({ config, store, service, bots }: DriverBotDeps)
   bot.catch(async (error, ctx) => {
     console.error('Driver bot error', error);
     try {
-      await ctx.reply('Sorry, something went wrong. Please try again.');
+      const language = await getUserLanguage(store, requireTelegramUserId(ctx));
+      await ctx.reply(botLabel('genericError', language));
     } catch (replyError) {
       console.error('Could not send driver bot error reply', replyError);
     }
@@ -189,7 +214,8 @@ async function completeTripFromPin(
   store: PostgresRidePoolStore,
   service: RidePoolService,
   passengerBot: Telegraf<Context>,
-  pinCode: string
+  pinCode: string,
+  language: SupportedLanguageCode
 ): Promise<void> {
   const telegramId = requireTelegramUserId(ctx);
   if (!telegramId) {
@@ -199,11 +225,11 @@ async function completeTripFromPin(
   await upsertUserFromContext(ctx, store, 'driver');
   const result = await service.completeTrip(pinCode, telegramId);
   if (result.kind === 'invalid_pin') {
-    await ctx.reply('Invalid PIN. Please check with the passengers and try again.');
+    await ctx.reply(botLabel('invalidPin', language));
     return;
   }
 
-  await ctx.reply(tripCompletedDriverMessage(result.pool));
+  await ctx.reply(tripCompletedDriverMessage(result.pool, language));
   await notifyTripCompleted(passengerBot, config, store, result.pool);
 }
 
@@ -214,12 +240,13 @@ async function notifyPassengersDriverAssigned(
   driverProfile: TelegramUserProfile
 ): Promise<void> {
   const passengerIds = await store.getConfirmedPassengerTelegramIds(pool.id);
+  const targets = await getLanguageTargets(store, passengerIds);
   await store.enqueueNotifications(
-    passengerIds.map((telegramId) => ({
+    targets.map(({ telegramId, language }) => ({
       targetBot: 'passenger' as const,
       chatId: telegramId,
       messageType: 'driver_assigned_passenger',
-      payload: { text: passengerDriverAssignedMessage(pool, driverProfile) }
+      payload: { text: passengerDriverAssignedMessage(pool, driverProfile, language) }
     }))
   );
 }
@@ -231,12 +258,13 @@ async function notifyTripCompleted(
   pool: RidePool
 ): Promise<void> {
   const passengerIds = await store.getConfirmedPassengerTelegramIds(pool.id);
+  const targets = await getLanguageTargets(store, passengerIds);
   await store.enqueueNotifications(
-    passengerIds.map((telegramId) => ({
+    targets.map(({ telegramId, language }) => ({
       targetBot: 'passenger' as const,
       chatId: telegramId,
       messageType: 'trip_completed_passenger',
-      payload: { text: tripCompletedPassengerMessage(pool) }
+      payload: { text: tripCompletedPassengerMessage(pool, language) }
     }))
   );
 
@@ -278,6 +306,33 @@ async function upsertUserFromContext(
   return (await store.getUserProfile(profile.telegramId)) ?? profile;
 }
 
+function languageKeyboard(language: SupportedLanguageCode) {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback(
+        `${botLabel('languageEnglish', language)}${language === 'en' ? ' ✓' : ''}`,
+        'language:en'
+      ),
+      Markup.button.callback(
+        `${botLabel('languageAmharic', language)}${language === 'am' ? ' ✓' : ''}`,
+        'language:am'
+      )
+    ]
+  ]);
+}
+
+async function editOrReply(
+  ctx: Context,
+  message: string,
+  extra?: Parameters<Context['reply']>[1]
+): Promise<void> {
+  try {
+    await ctx.editMessageText(message, extra as Parameters<Context['editMessageText']>[1]);
+  } catch {
+    await ctx.reply(message, extra);
+  }
+}
+
 async function runTelegramAction(
   ctx: Context,
   store: PostgresRidePoolStore,
@@ -308,10 +363,11 @@ async function runTelegramAction(
     });
   } catch (error) {
     if (error instanceof Error && error.message.startsWith('Action is already being processed')) {
+      const language = await getUserLanguage(store, telegramId);
       try {
-        await ctx.answerCbQuery('Already processing. Please wait.');
+        await ctx.answerCbQuery(botLabel('alreadyProcessing', language));
       } catch {
-        await ctx.reply('Already processing. Please wait.');
+        await ctx.reply(botLabel('alreadyProcessing', language));
       }
       return;
     }

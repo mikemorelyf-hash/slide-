@@ -3,6 +3,7 @@ import type {
   AdminOverview,
   AdminPoolDetail,
   AdminPoolSummary,
+  LanguageCode,
   PassengerState,
   ReadinessReport,
   Route,
@@ -27,6 +28,10 @@ export async function getPassengerState(initData: string): Promise<PassengerStat
 
 export async function savePhone(initData: string, phoneNumber: string): Promise<PassengerState> {
   return requestState('/api/passenger/profile', initData, { phoneNumber });
+}
+
+export async function saveLanguage(initData: string, languageCode: LanguageCode): Promise<PassengerState> {
+  return requestState('/api/passenger/language', initData, { languageCode });
 }
 
 export async function createOrJoinPool(initData: string, routeId: string): Promise<PassengerState> {
